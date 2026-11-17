@@ -87,7 +87,7 @@ mise 자체의 신뢰 처리는 실행기 버전과 paranoid 설정을 따릅니
 | 최종 앱 실행의 관찰 | 결과 |
 | --- | --- |
 | 설치본 버전 | 0.3.0입니다. |
-| 설치본 SHA-256 | `4FC0F56D399D6EDCB86CB200D400FB149F0F75A0D2A38DB111BA04DC06C0CC84`로 현재 빌드와 일치했습니다. |
+| 설치본 SHA-256 | `AF50869E0A5CF4D433AFAED972CF1A43EC32D3DDA1FF9A0ECA2CA019BD88E512`로 현재 빌드와 일치했습니다. |
 | 실행 권한 | 일반 샌드박스이며 추가 권한 요청이 없었습니다. |
 | doctor | 고유 ID 30개와 `CODEX-01: pass`를 반환했습니다. |
 | doctor 상태 | pass 10·fail 0·warn 0·unknown 2·skipped 18이었습니다. |

@@ -55,7 +55,8 @@ test('고정 PowerShell 수집기 경로를 덧붙여도 -Command 실행은 읽�
 });
 
 test('기본 조회 환경은 비밀·proxy·hook을 제거하고 원본 환경은 보존한다', () => {
-  const environment = { Path: 'C:\\Tools', pAtHeXt: '.EXE;.CMD', SystemRoot: 'C:\\Windows', GH_TOKEN: SECRET, AWS_SECRET_ACCESS_KEY: SECRET, HTTP_PROXY: `https://${SECRET}@example.test`, node_options: SECRET, PYTHONPATH: SECRET, DOTNET_STARTUP_HOOKS: SECRET, GIT_CONFIG_KEY_0: SECRET, MISE_DATA_DIR: 'C:\\Tools\\mise', RUSTUP_HOME: 'relative', GOTOOLCHAIN: 'auto' };
+  const projectSettings = { GOFLAGS: '-mod=vendor', RUSTC_WRAPPER: 'C:/Tools/sccache.exe', MAKEFLAGS: '-j2', MAKEFILES: 'C:/project/build-settings.mk', PSModulePath: 'C:/project/modules' };
+  const environment = { Path: 'C:\\Tools', pAtHeXt: '.EXE;.CMD', SystemRoot: 'C:\\Windows', GH_TOKEN: SECRET, AWS_SECRET_ACCESS_KEY: SECRET, HTTP_PROXY: `https://${SECRET}@example.test`, node_options: SECRET, PYTHONPATH: SECRET, DOTNET_STARTUP_HOOKS: SECRET, GIT_CONFIG_KEY_0: SECRET, MISE_DATA_DIR: 'C:\\Tools\\mise', RUSTUP_HOME: 'relative', GOTOOLCHAIN: 'auto', ...projectSettings };
   const original = { ...environment };
   const env = queryEnvironment(environment);
   assert.equal(env.PATH, environment.Path);
@@ -71,6 +72,10 @@ test('기본 조회 환경은 비밀·proxy·hook을 제거하고 원본 환경�
   const executed = queryEnvironment({ ...environment, APP_MODE: 'test' }, { execute: true });
   assert.equal(executed.APP_MODE, 'test');
   assert.equal(executed.GH_TOKEN, SECRET);
+  for (const [key, value] of Object.entries(projectSettings)) {
+    assert.equal(env[key], undefined, `read-only: ${key}`);
+    assert.equal(executed[key], value, `project execution: ${key}`);
+  }
   for (const key of ['node_options', 'PYTHONPATH', 'DOTNET_STARTUP_HOOKS', 'GIT_CONFIG_KEY_0']) assert.equal(executed[key], undefined, key);
 });
 

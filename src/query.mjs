@@ -9,6 +9,12 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SAFE_ROOT_VARIABLES = ['MISE_DATA_DIR', 'MISE_CONFIG_DIR', 'MISE_CACHE_DIR', 'RUSTUP_HOME', 'CARGO_HOME', 'DOTNET_ROOT', 'DOTNET_ROOT_X64', 'DOTNET_ROOT_X86', 'DOCKER_CONFIG', 'VSCODE_PORTABLE'];
 const mutatingTools = new Set(['winget', 'mise', 'docker', 'process-compose', 'wsl', 'rustup', 'rustc', 'npm', 'dotnet', 'go', 'cargo', 'node', 'python', 'pwsh', 'uv', 'zig', 'task', 'just', 'make']);
 const PROJECT_RUNNERS = new Set(['task', 'just', 'make']);
+const PROJECT_BUILD_ENVIRONMENT = /^(?:GOFLAGS|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|MAKEFLAGS|GNUMAKEFLAGS|MFLAGS|MAKEFILES|PSModulePath)$/i;
+
+function blockedEnvironment(name, execute) {
+  // Read-only probes must not evaluate these settings; selected project builds inherit them.
+  return isEnvironmentInjection(name) && !(execute && PROJECT_BUILD_ENVIRONMENT.test(name));
+}
 
 function forceEnvironment(environment, values) {
   const names = new Set(Object.keys(values).map((name) => name.toUpperCase()));
@@ -31,7 +37,7 @@ export function queryEnvironment(environment, { execute = false } = {}) {
     // Keep hooks/startup injection disabled while preserving project variables.
     Object.assign(child, environment);
     for (const name of Object.keys(child)) {
-      if (isEnvironmentInjection(name)) delete child[name];
+      if (blockedEnvironment(name, true)) delete child[name];
     }
   }
   return forceEnvironment(child, { MISE_OFFLINE: execute ? 'false' : 'true', MISE_AUTO_INSTALL: '0', MISE_TASK_RUN_AUTO_INSTALL: '0', COREPACK_ENABLE_NETWORK: execute ? '1' : '0', COREPACK_ENABLE_AUTO_PIN: '0', PNPM_PACKAGE_MANAGER_STRICT: 'false', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false' });
@@ -126,7 +132,7 @@ export function createQuery({ projectPath, host, timeoutMs = 5000, environment =
     candidate.path = assessment.executable;
     const cwd = options.cwd ?? projectPath;
     const env = forceEnvironment(queryEnvironment(environment, { execute }), options.env ?? {});
-    for (const name of Object.keys(env)) if (isEnvironmentInjection(name)) delete env[name];
+    for (const name of Object.keys(env)) if (blockedEnvironment(name, execute)) delete env[name];
     forceEnvironment(env, { MISE_AUTO_INSTALL: '0', MISE_TASK_RUN_AUTO_INSTALL: '0' });
     if (!execute) forceEnvironment(env, { MISE_OFFLINE: '1', MISE_NO_HOOKS: '1', MISE_NO_ENV: '1', COREPACK_ENABLE_NETWORK: '0', COREPACK_ENABLE_AUTO_PIN: '0' });
     let temporary;
