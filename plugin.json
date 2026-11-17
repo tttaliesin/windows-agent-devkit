@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "windows-agent-devkit",
+  "version": "0.1.0",
+  "description": "Windows 프로젝트의 개발 도구 선언과 실행 경로를 변경 없이 점검합니다.",
+  "repository": "https://github.com/tttaliesin/windows-agent-devkit"
+}
