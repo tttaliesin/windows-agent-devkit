@@ -57,11 +57,11 @@ test('stable report fields and outcome separation are preserved for all seven ID
 });
 
 test('mise installed inventory and PATH selection pass with real user data roots retained', async (t) => {
-  const f = await fixture(t, { 'mise.toml': '[tools]\nnode = "24.18.1"\n' });
+  const f = await fixture(t, { 'mise.toml': '[tools]\nnode = "24.18.1"\ntask = "3.54.0"\n[tasks.check]\nrun = "never-execute-this-task"\n' });
   requireLanguage(f, 'node');
   f.host.environment = { MISE_DATA_DIR: 'D:/user/tools', MISE_INSTALLS_DIR: 'D:/user/installations', MISE_CACHE_DIR: 'D:/user/cache', MISE_NODE_VERSION: '24.18.1', RUSTUP_HOME: 'D:/user/rust', DOTNET_ROOT: 'D:/dotnet', GH_TOKEN: token, NODE_OPTIONS: '--require evil', DOTNET_STARTUP_HOOKS: 'evil.dll' };
   f.host.commands.node = [{ path: 'd:/USER/tools/installs/node/24.18.1/node.exe' }];
-  const q = runner(f, (tool, args) => tool === 'mise' ? args[0] === '--version' ? ok('mise 2026.11.0 windows-x64') : args[0] === 'ls' ? ok(JSON.stringify({ node: [{ version: '24.18.1', install_path: 'D:/user/tools/installs/node/24.18.1', source: token, active: true }] })) : ok('D:/user/tools/installs/node/24.18.1/node.exe') : undefined);
+  const q = runner(f, (tool, args) => tool === 'mise' ? args[0] === '--version' ? ok('2026.9.4 windows-x64') : args[0] === 'ls' ? ok(JSON.stringify({ node: [{ version: '24.18.1', install_path: 'D:/user/tools/installs/node/24.18.1', source: token, active: true }] })) : ok('D:/user/tools/installs/node/24.18.1/node.exe') : undefined);
   const c = await check(f, 'TOOLS-01', q.query);
   assert.equal(c.status, 'pass');
   assert.equal(c.observed.selections[0].comparison, 'same');

@@ -182,7 +182,16 @@ export async function smokeBundle(root, version) {
     for (const file of await filesUnder(join(root, 'data'), { optional: true })) { const target = join(isolated, 'data', relative(join(root, 'data'), file)); await mkdir(dirname(target), { recursive: true }); await cp(file, target); }
     assert.ok(!(await filesUnder(isolated)).some((file) => normalized(relative(isolated, file)).split('/').includes('node_modules')));
     await mkdir(join(fixture, '.git'));
-    const declarations = { 'package.json': '{"engines":{"node":">=24 <25"}}\n', 'mise.toml': '[tools]\nnode="24.18.1"\npython="3.14.0"\n', 'pyproject.toml': '[project]\nname="bundle-fixture"\nversion="1.0.0"\nrequires-python=">=3.12"\n', 'process-compose.yaml': 'version: "0.5"\nprocesses:\n  example:\n    command: "never-execute-this-service"\n', '.env': 'PRIVATE_SENTINEL=never-copy-this-value\n' };
+    const declarations = {
+      'package.json': '{"engines":{"node":">=24 <25"},"scripts":{"check":"never-execute-this-task"}}\n',
+      'mise.toml': '[tools]\nnode="24.18.1"\npython="3.14.0"\n[tasks.check]\nrun="never-execute-this-task"\n',
+      'Taskfile.yml': 'version: "3"\ntasks:\n  check:\n    cmds: [never-execute-this-task]\n',
+      Justfile: 'check:\n    never-execute-this-task\n',
+      Makefile: '.PHONY: check\ncheck:\n\tnever-execute-this-task\n',
+      'pyproject.toml': '[project]\nname="bundle-fixture"\nversion="1.0.0"\nrequires-python=">=3.12"\n',
+      'process-compose.yaml': 'version: "0.5"\nprocesses:\n  example:\n    command: "never-execute-this-service"\n',
+      '.env': 'PRIVATE_SENTINEL=never-copy-this-value\n',
+    };
     for (const [name, content] of Object.entries(declarations)) await writeFile(join(fixture, name), content);
     const cli = join(isolated, 'dist', 'cli.mjs');
     const observedVersion = await runNode([cli, '--version'], temporary);
@@ -199,6 +208,9 @@ assert.ok(code===0||code===1);`;
     assert.equal(tested.code, 0, '의존성 없는 번들 진단 검사');
     const report = JSON.parse(tested.stdout);
     assert.equal(report.pluginVersion, version); assert.ok(Array.isArray(report.checks) && report.checks.length > 0);
+    assert.deepEqual(new Set(report.taskRunners.declarations.map((item) => item.tool)), new Set(['mise', 'task', 'just', 'make', 'npm']), '독립 번들의 작업 실행기 탐지');
+    assert.equal(report.taskRunners.recommendation.status, 'aligned', '독립 번들의 mise tasks 권장 비교');
+    assert.equal(report.task, null, '독립 번들 진단은 작업을 실행하지 않습니다.');
     for (const id of ['NODE-01', 'PY-01']) assert.equal(report.checks.find((c) => c.checkId === id)?.compatibility, 'satisfied', `번들 파서·버전 검사: ${id}`);
     assert.ok(!tested.stdout.includes('never-copy-this-value'), '비밀 값 제외');
     let native = 'not_applicable';

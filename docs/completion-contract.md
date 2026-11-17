@@ -1,6 +1,6 @@
-# 0.2.1 모듈 계약
+# 0.3.0 모듈 계약
 
-이 문서는 0.2.1 구현의 모듈 사이 입력과 반환 계약을 기록합니다.
+이 문서는 0.3.0 구현의 모듈 사이 입력과 반환 계약을 기록합니다.
 기준일은 2026-11-17입니다.
 실제 호스트와 앱의 검증 상태는 [검증 기록](verification.md)에서 별도로 관리합니다.
 명령 형식은 [진단 CLI 사용법](diagnostic-cli.md)을 따릅니다.
@@ -35,6 +35,8 @@ Node.js 24 이상과 PowerShell 7을 실행 기준으로 사용합니다.
 | `declarations[]` | `source`, `kind`, `scope`, `distance`, `selectedLanguages`, 선택적 `unresolvedFields`입니다. |
 | `workspaces[]` | `source`, `kind`, `state`, `patterns`, `members`, `notes`, 선택적 `root`입니다. |
 | `ci[]` | `source`, `provider`, `state`, `jobs`, `notes`입니다. |
+| `taskRunners[]` | `tool`, `source`, `state`, `tasks`, `notes`와 선택적 `taskDetails`입니다. |
+| `taskRunnerCI[]` | `source`, `job`, `step`, `tool`, `state`, 선택적 `task`, `executionLocation`입니다. |
 | `processCompose` | `source`, `sources`, `services`, `dynamicEnvironment`, `configurations`, 선택적 `shell`입니다. |
 | `compose` | `sources`, `services`, `dynamicEnvironment`, `configurations`입니다. |
 | `devcontainer` | 있는 경우 `source`, `runtimeLocation`, `configurations`, 선택적 `composeFiles`입니다. |
@@ -151,9 +153,10 @@ Docker 대상은 `dockerContext`, 선택적 `image`와 `composeFile`입니다.
 
 `runProjectTask({projectPath, task, execute, query, timeoutMs})`는 신뢰한 호스트 작업을 처리합니다.
 작업은 `context: "native"`, `trusted: true`, `tool`, `args: string[]`을 포함합니다.
-허용한 도구는 `node`, `npm`, `python`, `uv`, `go`, `cargo`, `rustc`, `zig`, `dotnet`, `pwsh`입니다.
+허용한 도구는 `node`, `npm`, `python`, `uv`, `go`, `cargo`, `rustc`, `zig`, `dotnet`, `pwsh`, `mise`, `task`, `just`, `make`입니다.
 CLI는 `validate --execute --task-file <파일>`에서 이 입력을 전달합니다.
-실행 작업 경로는 `projectPath`입니다.
+기본 실행 작업 경로는 `projectPath`입니다.
+선택적 `cwd`와 `env`의 제약은 작업 실행기 계약을 따릅니다.
 `context: "rust"`와 `context: "wsl"` 작업은 각 validator가 처리합니다.
 
 호스트 작업의 결과는 30개 점검 ID와 별도의 보고서 `task` 필드입니다.
@@ -175,6 +178,57 @@ stateDiagram-v2
     기동 --> 정리: 시작 실패
     정리 --> [*]: 자체 자원만 정리
     생략 --> [*]
+```
+
+## 작업 실행기 계약
+
+`metadata.taskRunners`는 mise tasks·Taskfile·Justfile·Makefile·npm scripts의 정적 선언 배열입니다.
+각 `state`는 `declared | unknown`입니다.
+`tasks`에는 정적으로 확인한 작업 이름만 포함합니다.
+선택적 `taskDetails`는 `{name, shell?, directory?, environmentKeys?, dependencies?}`입니다.
+셸에는 알려진 실행 파일과 인수만 기록합니다.
+원시 작업 명령과 환경 변수 값은 포함하지 않습니다.
+포함 파일·파일 작업·동적 계산의 미지원 의미는 `unknown`과 사유로 남깁니다.
+
+`report.taskRunners`는 `recommended`, `declarations`, `ci`, `tools`, `recommendation`, `proposal`, `limitations`입니다.
+`recommended`는 `mise`입니다.
+권장 적용 범위는 새 다중 언어 프로젝트의 기본 후보입니다.
+기존 실행기는 자동 변환하지 않습니다.
+`recommendation.status`는 `aligned | different | unknown`입니다.
+이 판정은 프로젝트 작업의 실행 성공과 별도입니다.
+`tools`는 버전 조회의 실행 상태·버전·실제 실행 파일 경로를 기록합니다.
+정적 선언과 CI 관찰만으로 특정 실행기의 Windows 설치를 필수라고 확정하지 않습니다.
+명시적으로 선택한 native 실행기를 찾지 못하면 `PATH-01`과 작업 실행을 실패로 보고합니다.
+
+기존 30개 ID에는 `REQ-01`, `PATH-01`, `TOOLS-01`, `ENV-02`, `SH-01`, `RCM-01`의 근거를 연결합니다.
+프로젝트 작업 실행 결과는 별도의 `report.task`를 유지합니다.
+native JSON의 `tool`은 기존 도구와 `mise`, `task`, `just`, `make`를 허용합니다.
+mise는 `args[0] === "run"`인 경로만 허용합니다.
+선택적 `cwd`는 프로젝트 안의 실제 일반 디렉터리여야 합니다.
+선택적 `env`는 최대 64개 문자열 키·값이며 총 32KiB로 제한합니다.
+주입용 환경 변수와 설치 활성화 변수는 거부합니다.
+보고서에는 환경 변수 이름만 포함합니다.
+mise의 `MISE_AUTO_INSTALL`과 `MISE_TASK_RUN_AUTO_INSTALL`은 실행 시 `0`으로 강제합니다.
+플러그인은 별도의 `mise trust`나 신뢰 경로 확장을 추가하지 않습니다.
+mise 자체의 신뢰 처리는 설치한 버전과 paranoid 설정을 따릅니다.
+허용한 `--version` 외 작업 목록과 dry-run은 기본 진단에서 실행하지 않습니다.
+검증된 실행 파일에 argv를 직접 전달하며 기존 Windows Job Object의 정리 근거를 유지합니다.
+Windows Job의 제한 시간 초과를 `timed_out`으로 보존합니다.
+명시한 native 작업이 `unknown / not_run`이면 CLI 종료 코드는 1입니다.
+잘못된 작업 JSON의 원문은 CLI 파서 오류에 포함하지 않습니다.
+
+```mermaid
+sequenceDiagram
+    participant P as 프로젝트 선언
+    participant D as doctor
+    participant V as validate
+    participant R as 선택한 실행기
+    P->>D: 작업 이름·실행 문맥 정적 분석
+    D->>R: 허용한 버전 조회
+    R-->>D: 버전·경로 관찰
+    D-->>V: 권장 비교와 미확인 범위
+    V->>R: trusted JSON과 --execute의 선택한 작업
+    R-->>V: 종료 코드·프로세스 정리 근거
 ```
 
 ## 빌드와 확인 범위

@@ -3,7 +3,10 @@
 Windows 개발 프로젝트의 선언과 실제 도구 선택을 점검하고, 요청한 환경 변경과 실행 검증을 돕는 로컬 Codex 플러그인입니다.
 Node.js·Python·Go·Rust·Zig·C#과 Windows 네이티브·WSL 2·Docker·Process Compose를 대상으로 합니다.
 
-[권장 개발환경](docs/windows-environment.md) · [CLI 사용법](docs/diagnostic-cli.md) · [30개 점검 항목](docs/environment-checks.md) · [검증 기록](docs/verification.md)
+[권장 개발환경](docs/windows-environment.md) · [작업 실행기 선택](docs/task-runners.md) · [CLI 사용법](docs/diagnostic-cli.md) · [30개 점검 항목](docs/environment-checks.md) · [검증 기록](docs/verification.md)
+
+0.3.0은 작업 실행기 탐지·권장 비교·선택 실행 검증을 포함합니다.
+이번 통합의 테스트·CI·앱 검증 상태는 [검증 기록](docs/verification.md)에서 별도로 확인합니다.
 
 ## 빠른 시작
 
@@ -19,6 +22,9 @@ node dist/cli.mjs doctor --project . --format json
 
 doctor는 30개 ID의 적용 여부·경로·버전·호환성·권장 구성 차이를 JSON이나 한국어 텍스트로 반환합니다.
 기본 진단은 프로젝트 코드와 서비스를 실행하지 않습니다.
+작업 실행기 설정은 정적으로 탐지합니다.
+includes와 지원하지 않는 동적 문법은 `unknown`으로 남깁니다.
+목록 조회와 dry run도 설정을 평가할 수 있으므로 자동 실행하지 않습니다.
 `unknown`은 근거가 부족한 상태입니다.
 `skipped`는 선택하지 않았거나 필요하지 않은 검사입니다.
 전체 환경의 성공 여부와 각 검사의 확인 범위를 구분합니다.
@@ -81,7 +87,19 @@ stateDiagram-v2
 Docker 검증은 명시한 context와 기존 이미지 또는 선택한 Compose 서비스를 사용합니다.
 Process Compose는 시작·준비 검사·종료를 구분합니다.
 Windows 프로젝트의 기존 명령은 신뢰한 task JSON으로 전달합니다.
+`--task-file`은 플러그인 JSON을 읽으며 Go Task의 Taskfile을 받는 옵션이 아닙니다.
+0.3.0의 실행기 선택은 `mise`·`task`·`just`·`make`와 문자열 인수 배열을 사용합니다.
+`mise run check`는 `tool: "mise"`, `args: ["run", "check"]`로 전달합니다.
+선택 항목 `cwd`는 프로젝트 내부 상대 경로를 사용합니다.
+선택 항목 `env`의 값과 원시 명령 출력은 보고서에 넣지 않습니다.
+플러그인 경유 mise 실행은 자동 설치를 비활성화합니다.
+작업 JSON의 신뢰 표시는 mise 설정의 신뢰 상태를 자동 승격하지 않습니다.
 사용 예시와 정리 제한은 [CLI 사용법](docs/diagnostic-cli.md)에 기록합니다.
+
+신규 다중언어 프로젝트의 공통 작업 진입점에는 mise tasks를 기본 권장합니다.
+기존 Task·just·Make·npm scripts에는 권장 차이와 전환안 또는 유지 사유를 제시합니다.
+기존 명령의 자동 변환과 실행기의 필수 설치는 수행하지 않습니다.
+역할·선택·Windows 셸·CI 연계의 예시는 [작업 실행기 가이드](docs/task-runners.md)에 기록합니다.
 
 ## 개발과 확인
 

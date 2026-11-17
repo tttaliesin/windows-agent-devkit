@@ -14,7 +14,7 @@ import semver from 'semver';
 const COLLECTOR = fileURLToPath(new URL('../scripts/collect-advanced.ps1', import.meta.url));
 const LIMIT = 256 * 1024;
 const LANGUAGES = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
-const TOOL_NAMES = { node: 'node', nodejs: 'node', python: 'python', go: 'go', golang: 'go', rust: 'rust', rustc: 'rust', zig: 'zig', dotnet: 'dotnet' };
+const TOOL_NAMES = { node: 'node', nodejs: 'node', python: 'python', go: 'go', golang: 'go', rust: 'rust', rustc: 'rust', zig: 'zig', dotnet: 'dotnet', task: 'task', just: 'just', make: 'make' };
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const ROOTS = ['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'SystemDrive', 'TEMP', 'TMP', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'MISE_DATA_DIR', 'MISE_CONFIG_DIR', 'MISE_CACHE_DIR', 'MISE_STATE_DIR', 'MISE_TMP_DIR', 'MISE_INSTALLS_DIR', 'MISE_INSTALL_STORE_DIR', 'MISE_PLUGINS_DIR', 'MISE_SYSTEM_DATA_DIR', 'MISE_SYSTEM_CONFIG_DIR', 'MISE_SYSTEM_DIR', 'MISE_SYSTEM_CONFIG_FILE', 'MISE_GLOBAL_CONFIG_FILE', 'MISE_CONFIG_FILE', 'MISE_ENV', 'MISE_NODE_VERSION', 'MISE_PYTHON_VERSION', 'MISE_GO_VERSION', 'MISE_RUST_VERSION', 'MISE_ZIG_VERSION', 'MISE_DOTNET_VERSION', 'DOTNET_ROOT', 'DOTNET_ROOT_X64', 'DOTNET_ROOT_X86', 'DOTNET_ROOT_ARM64', 'DOTNET_ROOT(x86)', 'DOTNET_MULTILEVEL_LOOKUP', 'RUSTUP_HOME', 'CARGO_HOME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GH_CONFIG_DIR', 'VSCODE_PORTABLE'];
 const DOTNET_ENV = { DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: '0', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0', DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: 'true', DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK: '1', DOTNET_SDK_VULNERABILITY_CHECK_DISABLE: 'true', DOTNET_CLI_UI_LANGUAGE: 'en-US' };
@@ -169,7 +169,7 @@ async function miseSafety(root, env, metadata = {}) {
     try { data = parseToml(content.text); } catch { issues.push('invalid_toml'); continue; }
     if (dynamic(data)) { issues.push('unsafe_dynamic_config'); continue; }
     if (['.miserc.toml', 'miserc.toml'].includes(pathsFor(file).basename(file)) && Object.keys(data).length) { issues.push('config_discovery_override'); continue; }
-    if (Object.keys(data).some((name) => !['tools', 'settings', 'min_version'].includes(name))) issues.push('unsafe_dynamic_config');
+    if (Object.keys(data).some((name) => !['tools', 'settings', 'min_version', 'tasks'].includes(name))) issues.push('unsafe_dynamic_config');
     if (data.settings && (typeof data.settings !== 'object' || Object.keys(data.settings).some((name) => !['experimental', 'offline', 'auto_install', 'legacy_version_file', 'idiomatic_version_file_enable_tools', 'not_found_auto_install'].includes(name)))) issues.push('unsupported_settings');
     if (data.tools !== undefined && (!data.tools || typeof data.tools !== 'object' || Array.isArray(data.tools))) { issues.push('unsupported_tool_table'); continue; }
     for (const [name, values] of Object.entries(data.tools ?? {})) {
@@ -198,7 +198,7 @@ async function toolsCheck(ctx) {
     if (version.state === 'not_found') return result('TOOLS-01', 'warn', 'mise_not_resolved', '현재 PATH에서 mise를 찾지 못했습니다.', { resolution: 'not_resolved', observed, recommendation: { status: 'different', expected: 'mise', exception: '.NET SDK는 공식 설치 경로를 유지합니다.' } });
     return failed('TOOLS-01', version, observed);
   }
-  observed.version = /^mise (\d+\.\d+\.\d+)/.exec(text(version.stdout).trim())?.[1] ?? null;
+  observed.version = /^(?:mise )?(\d+\.\d+\.\d+)(?:\s|$)/.exec(text(version.stdout).trim())?.[1] ?? null;
   if (!observed.version) return failed('TOOLS-01', version, observed, 'unsupported_version_output');
   const installed = await ask('mise', ['ls', '--installed', '--json'], MISE_ENV);
   observed.inventoryQuery = evidence(installed);

@@ -1,4 +1,110 @@
-# 0.2.1 구현의 검증 기록
+# 구현 검증 기록
+
+이 문서는 버전별 자동 검사와 실제 호스트·앱 관찰을 구분합니다.
+검증 기준일은 2026-11-17입니다.
+
+## 0.3.0 작업 실행기 통합
+
+0.3.0은 mise tasks 기본 권장과 Taskfile·Justfile·Makefile·npm scripts의 정적 탐지를 포함합니다.
+기존 30개 점검 ID에 선언·경로·셸·권장 비교 근거를 연결합니다.
+목록 조회와 dry-run으로 프로젝트 작업을 평가하지 않습니다.
+동적 계산·외부 포함·지원하지 않는 문법은 미확인으로 남깁니다.
+
+| 검사 | 실제 결과 |
+| --- | --- |
+| 로컬 `node --test` | 314개 중 통과 310개·실패 0개·생략 4개입니다. |
+| 파일 심볼릭 링크 검사 | 로컬의 네 검사는 링크 생성 권한이 없어 생략됐습니다. |
+| `node scripts/check-package.mjs` | 현재 소스의 독립 번들·TOML·YAML·네 실행기와 npm scripts 분석·원본 보존 검사를 통과했습니다. |
+| 설치 패키지 | `node scripts/package-plugin.mjs`와 패키지의 독립 실행 검사를 통과했습니다. |
+| 출력 비공개 | 원시 명령·환경 값·오류 출력과 잘못된 JSON 입력 값의 비노출을 검사했습니다. |
+| 실행 상태 | 선택 실행·실패·timeout·경로·환경 제한과 Windows Job 정리 근거를 검사했습니다. |
+
+잘못된 JSON의 파서 오류는 원문을 포함하지 않는 고정 메시지로 바꿨습니다.
+CI에서 mise 호출만 확인한 경우 로컬 작업 채택은 미확인으로 남깁니다.
+Windows Job의 제한 시간 초과를 `timed_out`으로 보존합니다.
+실제 Windows 프로세스의 제한 시간 검사에서도 이 상태와 빈 Job 종료 근거를 확인했습니다.
+
+### 실제 Windows 작업 실행
+
+통제된 새 프로젝트에서 다음 검사를 실행했습니다.
+
+```powershell
+node scripts/smoke-task-runners.mjs
+```
+
+이 검사는 설치된 실행기를 사용하며 도구를 설치하지 않습니다.
+결과 파일은 Git에서 제외한 `.local/task-runners`에 저장합니다.
+
+| 실행기 | 관찰한 버전 | 실제 결과 |
+| --- | --- | --- |
+| mise | 2026.9.4 | `run check` 실행과 marker 생성을 확인했습니다. |
+| Task | 3.54.0 | `check` 실행과 marker 생성을 확인했습니다. |
+| just | 1.52.0 | `check` 실행과 marker 생성을 확인했습니다. |
+| GNU Make | 4.4.1 | `check` 실행과 marker 생성을 확인했습니다. |
+
+네 작업은 종료 코드 0을 반환했습니다.
+네 작업의 정리는 `confirmed: true`, `forced: false`, `proof: windows_job_empty`였습니다.
+marker의 실행기 이름과 실제 작업 경로를 확인했습니다.
+mise의 두 자동 설치 비활성화 환경 값도 확인했습니다.
+진단과 실행 전후의 fixture 원본은 보존됐습니다.
+
+Make는 현재 Windows PATH와 확인한 WSL 경로에 없었습니다.
+정상 실행 검증에는 Git 제외 경로의 격리된 MSYS2 배포본을 사용했습니다.
+검증 프로세스에만 이 배포본의 경로를 추가했습니다.
+다운로드한 Make 4.4.1-5 패키지의 SHA-256은 `871f760657a360279f29b945a7fd7d9655fe46a3e1e06dd783c9e74514aa0b27`로 공식 배포 메타데이터와 일치했습니다. [MSYS2 Make 패키지](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-make?repo=ucrt64)
+같은 배포처의 gettext-runtime 1.0-1과 기존 Git for Windows의 런타임 DLL을 사용했습니다. [MSYS2 gettext-runtime](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-gettext-runtime)
+이 결과는 검증용 Windows 배포본의 관찰입니다.
+
+just 1.52.0은 최신 문서의 `[windows]` 속성을 사용한 설정에서 `extraneous attribute`로 실패했습니다.
+`set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]`로 바꾼 실제 작업은 통과했습니다.
+가이드에는 확인한 버전의 구문을 반영했습니다.
+
+### 앱의 설치본 검증
+
+앱과 공유하는 설치 목록에서 0.3.0의 설치·활성화를 확인했습니다.
+앱의 플러그인 화면에서 0.3.0과 세 Skill을 확인했습니다.
+앱의 기존 검증 대화에서 설치본의 두 Skill을 읽고 같은 설치 루트의 CLI를 호출했습니다.
+
+첫 일반 샌드박스 호출에서 doctor는 고유 ID 30개를 반환했습니다.
+상태 집계는 pass 10·fail 0·warn 0·unknown 2·skipped 18이었습니다.
+`CODEX-01`은 pass였고 mise tasks 권장 비교는 aligned였습니다.
+Task·just·Make의 실행과 새 marker 세 개를 확인했습니다.
+
+mise의 첫 호출과 단독 재시도는 종료 코드 1로 실패했습니다.
+같은 샌드박스에서 실행한 별도 진단은 공유 mise 상태의 `tracked-configs`와 `trusted-configs` 경로에 `os error 5`를 보고했습니다.
+이 오류와 marker 부재를 작업 성공으로 바꾸지 않았습니다.
+원시 출력이 없는 Windows Job 보고서만으로 오류 원인을 확정하지 않았습니다.
+
+후속 검증의 mise 작업 JSON에는 해당 작업용 `MISE_STATE_DIR`를 새 fixture 내부로 명시했습니다.
+전역 상태 경로와 기존 신뢰 기록을 변경하거나 복사하지 않았습니다.
+mise 자체의 신뢰 처리는 실행기 버전과 paranoid 설정을 따릅니다.
+프로필 없는 문맥에서는 Task·just가 검증되지 않은 mise shim으로 선택되는 경우도 확인했습니다.
+이때 작업은 `unknown / not_run`이므로 실행 성공으로 보고하지 않습니다.
+명시한 작업의 미실행 상태에도 CLI가 0을 반환하던 문제는 종료 코드 1로 수정했습니다.
+최종 검증 프로세스에는 확인한 Node·Task·just·PowerShell·Make의 실행 파일 디렉터리를 명시했습니다.
+전역 PATH는 변경하지 않았습니다.
+
+| 최종 앱 실행의 관찰 | 결과 |
+| --- | --- |
+| 설치본 버전 | 0.3.0입니다. |
+| 설치본 SHA-256 | `4FC0F56D399D6EDCB86CB200D400FB149F0F75A0D2A38DB111BA04DC06C0CC84`로 현재 빌드와 일치했습니다. |
+| 실행 권한 | 일반 샌드박스이며 추가 권한 요청이 없었습니다. |
+| doctor | 고유 ID 30개와 `CODEX-01: pass`를 반환했습니다. |
+| doctor 상태 | pass 10·fail 0·warn 0·unknown 2·skipped 18이었습니다. |
+| 권장 비교 | mise tasks가 aligned였습니다. |
+| 네 실행기 | mise·Task·just·Make 모두 `pass / succeeded`, 작업과 CLI 종료 코드 0이었습니다. |
+| 프로세스 정리 | 네 작업 모두 `confirmed: true`, `forced: false`, `windows_job_empty`였습니다. |
+| 실행 결과 파일 | 새 marker 네 개의 도구 이름과 작업 경로가 검증 대상과 일치했습니다. |
+| mise 자동 설치 | 두 환경 값이 모두 문자열 `"0"`이었습니다. |
+| 입력 보존 | fixture 입력 아홉 개의 실행 전후 SHA-256이 모두 같았습니다. |
+
+검증 대화는 설치된 Skill과 CLI를 사용했습니다.
+이전 실패 보고서와 원시 진단 로그는 Git 제외 경로에 보존했습니다.
+최종 앱 검증의 상태 경로와 PATH는 명시적으로 선택한 검증 프로세스의 구성입니다.
+다른 앱 샌드박스와 기존 전역 상태 경로에서도 같은 결과가 난다고 일반화하지 않습니다.
+Windows CI의 현재 커밋 결과는 [PR 검사](https://github.com/tttaliesin/windows-agent-devkit/pull/1/checks)에서 확인합니다.
+
+## 0.2.1 기존 기능의 검증
 
 이 문서는 구현한 기능의 자동 검사와 실제 실행 결과를 구분해 기록합니다.
 검증일은 2026-11-17입니다.

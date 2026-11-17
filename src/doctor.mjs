@@ -11,8 +11,9 @@ import { attachSupport } from './support.mjs';
 import { loadExceptions } from './configure.mjs';
 import { checkApp } from './app-check.mjs';
 import { runProjectTask } from './task.mjs';
+import { summarizeTaskRunners, collectTaskRunnerTools, attachTaskRunnerChecks } from './task-runner-checks.mjs';
 
-export const VERSION = '0.2.1';
+export const VERSION = '0.3.0';
 export const P0_IDS = ['ENV-01', 'ENV-02', 'SH-01', 'PATH-01', 'REQ-01', 'PKG-01', 'GIT-01', 'GIT-02', 'NODE-01', 'NODE-02', 'PY-01', 'PY-02', 'GO-01', 'RUST-01', 'ZIG-01', 'DOTNET-01', 'TOOLS-01', 'WSL-01', 'CTR-01', 'LD-01', 'PC-01', 'RCM-01'];
 export const P1_IDS = ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02', 'IDE-01', 'CODEX-01', 'AUX-01', 'STORE-01'];
 const LANGUAGE_TOOLS = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
@@ -162,15 +163,17 @@ export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], 
   const query = suppliedQuery ?? createQuery({ projectPath: root, host, timeoutMs });
   await enhanceRuntimes({ project, host, tools: active, query });
   const report = buildReport(project, host, { languages, wsl, containers, processCompose, native });
+  const taskRunners = summarizeTaskRunners(project);
   const effective = { ...project, requirements: effectiveRequirements(project, { languages, native }), metadata: structuredClone(project.metadata ?? {}) };
   if (options.ide) (effective.metadata.ide ??= {}).required = true;
   if (options.storage) effective.metadata.storage = { requested: true, path: typeof options.storage === 'string' ? options.storage : root };
   if (options.githubAuth) effective.metadata.auxiliary = { github: true, authentication: true };
-  const [advanced, infrastructure, validation, app] = await Promise.all([
+  const [advanced, infrastructure, validation, app, runnerTools] = await Promise.all([
     collectAdvanced({ projectPath: root, project: effective, host, timeoutMs, query }),
     collectInfrastructure({ project: effective, host, options: { ...options, wsl, containers, processCompose }, query }),
     validateEnvironment({ projectPath: root, project: effective, host, options: { ...options, timeoutMs }, query }),
     checkApp({ query, enabled: options.app, executable: options.codexExecutable }),
+    collectTaskRunnerTools({ summary: taskRunners, host, query, selectedTool: options.task?.context === 'native' ? options.task.tool : undefined }),
   ]);
   const map = new Map(report.checks.map((item) => [item.checkId, item]));
   for (const item of [...advanced.checks, ...infrastructure.checks, ...validation.checks, app]) map.set(item.checkId, item);
@@ -195,6 +198,9 @@ export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], 
   recommendation.recommendation.status = recommendation.observed.some((i) => i.status === 'different') ? 'different' : recommendation.observed.some((i) => i.status === 'unknown') ? 'unknown' : 'aligned';
   recommendation.status = recommendation.recommendation.status === 'different' ? 'warn' : recommendation.recommendation.status === 'unknown' ? 'unknown' : 'pass';
   recommendation.exceptions = report.exceptions;
+  taskRunners.tools = runnerTools;
+  attachTaskRunnerChecks(report, taskRunners);
+  report.summary = Object.fromEntries(['pass', 'fail', 'warn', 'unknown', 'skipped'].map((status) => [status, report.checks.filter((check) => check.status === status).length]));
   report.limitations = ['지원 정책은 2026-11-17의 오프라인 스냅샷이며 30일 후에는 미확인으로 처리합니다.', '지원 계열 판정은 최신 패치·취약점·모든 OS 지원 조합의 확인을 포함하지 않습니다.', '기본 진단은 프로젝트 명령·배포판 내부·컨테이너·서비스를 실행하지 않습니다.', '앱 설치 목록과 실제 Skill 호출의 관찰은 구분합니다.'];
   return report;
 }

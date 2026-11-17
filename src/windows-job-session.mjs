@@ -33,7 +33,7 @@ export function createWindowsJobSession(executable, args, {
     if (result) return;
     clearTimeout(launchTimer); clearTimeout(lifetimeTimer); signal?.removeEventListener('abort', abort);
     const proven = !protocolFailed && code === 0 && handshake?.activeProcesses === 0 && handshake.pid === (rootPid ?? 0);
-    result = { state: reason === 'invalid_session_options' ? 'not_run' : proven && rootPid && handshake.exitCode === 0 ? 'succeeded' : 'failed', exitCode: handshake?.exitCode ?? null,
+    result = { state: reason === 'invalid_session_options' ? 'not_run' : handshake?.timedOut ? 'timed_out' : proven && rootPid && handshake.exitCode === 0 ? 'succeeded' : 'failed', exitCode: handshake?.exitCode ?? null,
       forced: handshake?.forced === true, treeTerminated: proven, proof: proven ? 'windows_job_empty' : reason, rootPid, helperPid };
     start({ ...result, pid: rootPid });
     helper?.stdin?.destroy(); helper?.stdout?.destroy(); helper?.stderr?.destroy(); helper?.unref?.();
@@ -93,7 +93,7 @@ export function createWindowsJobSession(executable, args, {
           || typeof message.forced !== 'boolean' || !(message.exitCode === null || Number.isInteger(message.exitCode) && message.exitCode >= 0 && message.exitCode <= 0xffffffff)) {
           protocolFailed = true; void stop({ graceMs: 100 }); continue;
         }
-        handshake = { pid: message.pid, exitCode: message.exitCode, activeProcesses: message.activeProcesses, forced: message.forced };
+        handshake = { pid: message.pid, exitCode: message.exitCode, activeProcesses: message.activeProcesses, forced: message.forced, timedOut: message.reason === 'timed_out' };
       }
     }
   };

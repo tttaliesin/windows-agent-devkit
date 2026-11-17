@@ -73,7 +73,7 @@ test('default collection keeps the exact contract and literal project argument w
   assert.deepEqual(Object.keys(result.context), ['platform', 'os', 'processArchitecture', 'cwd', 'diagnosticShell']);
   assert.equal(result.context.diagnosticShell.profileApplied, false);
   assert.deepEqual(Object.keys(result.commands), [...INVENTORY_NAMES]);
-  assert.equal(INVENTORY_NAMES.length, 36);
+  assert.equal(INVENTORY_NAMES.length, 39);
   for (const name of INVENTORY_NAMES) {
     assert.deepEqual(Object.keys(result.commands[name][0]), ['name', 'commandType', 'path', 'fileVersion', 'productVersion']);
     assert.deepEqual(Object.keys(result.probes[name]), ['state', 'executable', 'arguments', 'exitCode', 'version', 'data', 'reason']);

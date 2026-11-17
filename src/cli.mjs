@@ -43,7 +43,8 @@ export const HELP = `Windows Agent Devkit ${VERSION}
   --compose-file <경로> --services <쉼표 목록>  격리 Compose 검증
   --service-config <경로> --services <쉼표 목록>  Process Compose 검증
   --rust-targets <쉼표 목록>  설치된 Rust target 점검
-  --task-file <JSON 파일>   신뢰한 명령의 context·tool·args·trusted 선언
+  --task-file <JSON 파일>   신뢰한 작업의 context·tool·args·trusted·cwd?·env?
+                          Go Task의 Taskfile을 받는 옵션이 아닙니다.
 
   --help / -h              도움말
   --version                CLI 버전
@@ -90,6 +91,12 @@ export function formatReport(report) {
     if (typeof check.observed === 'string') lines.push(`  관찰: ${check.observed}`);
     if (check.support?.status && check.support.status !== 'unknown') lines.push(`  공식 지원 계열: ${check.support.status} (${check.support.checkedOn})`);
   }
+  if (report.taskRunners) {
+    lines.push('', `작업 실행기 권장: mise tasks (${report.taskRunners.recommendation.status})`);
+    for (const item of report.taskRunners.declarations) lines.push(`  ${item.tool}: ${item.source} (${item.state}), 작업: ${item.tasks.join(', ') || '미확인'}`);
+    for (const item of report.taskRunners.tools) lines.push(`  실행 파일 ${item.tool}: ${item.version ?? '버전 미확인'} (${item.execution})${item.executable ? `, ${item.executable}` : ''}`);
+  }
+  if (report.task) lines.push('', `선택한 작업: ${report.task.tool ?? '미확인'} [${STATUS_LABELS[report.task.status]}], 실행: ${report.task.execution}, 종료 코드: ${report.task.exitCode ?? '없음'}`);
   lines.push('', `결과: 통과 ${report.summary.pass}, 요구 위반 ${report.summary.fail}, 검토 ${report.summary.warn}, 미확인 ${report.summary.unknown}, 생략 ${report.summary.skipped}`);
   return lines.join('\n');
 }
@@ -97,7 +104,9 @@ async function readJson(file) {
   if (!file) throw new Error('JSON 파일 경로가 필요합니다.');
   const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink() || info.size > 2 * 1024 * 1024) throw new Error('일반 JSON 파일만 최대 2MiB까지 읽습니다.');
-  return JSON.parse(await readFile(file, 'utf8'));
+  const contents = await readFile(file, 'utf8');
+  try { return JSON.parse(contents); }
+  catch { throw new Error('JSON 파일의 구문을 해석하지 못했습니다. 원문은 오류에 포함하지 않습니다.'); }
 }
 
 export async function main(args, { inspect, query } = {}) {
@@ -121,7 +130,8 @@ export async function main(args, { inspect, query } = {}) {
     await writeFile(options.output, `${output}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   process.stdout.write(`${output}\n`);
-  return payload.summary?.fail || payload.task?.status === 'fail' || /conflict|failed|partial/.test(payload.status ?? '') ? 1 : 0;
+  const unverifiedTask = options.action === 'validate' && options.execute && payload.task?.status === 'unknown';
+  return payload.summary?.fail || payload.task?.status === 'fail' || unverifiedTask || /conflict|failed|partial/.test(payload.status ?? '') ? 1 : 0;
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try { process.exitCode = await main(process.argv.slice(2)); }

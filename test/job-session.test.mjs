@@ -16,7 +16,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const native = { skip: process.platform !== 'win32', timeout: 30000 };
 const APP = 'C:\\Trusted\\process-compose.exe', SHELL = 'C:\\Trusted\\pwsh.exe';
 
-function fakeJob({ forged = false, missing = false, active = 0, startedActive = 1, forced = false, exitCode = 0 } = {}) {
+function fakeJob({ forged = false, missing = false, active = 0, startedActive = 1, forced = false, exitCode = 0, reason = 'root_exited' } = {}) {
   let launch, settingsPath, settings, control = '';
   const session = createWindowsJobSession(APP, ['up', 'arg with spaces', 'SECRET_ARGUMENT'], {
     cwd: path.resolve('.'), env: { PRIVATE_MARKER: 'SECRET_ENV_VALUE' }, pwshPath: SHELL, startupTimeoutMs: 1000,
@@ -30,7 +30,7 @@ function fakeJob({ forged = false, missing = false, active = 0, startedActive = 
       queueMicrotask(() => {
         const emit = (event, value) => child.stdout.write(`${JSON.stringify({ protocol: 1, token: forged ? '0'.repeat(64) : settings.token, event, pid: 5555, ...value })}\n`);
         emit('started', { activeProcesses: startedActive });
-        if (!missing) emit('finished', { activeProcesses: active, forced, exitCode });
+        if (!missing) emit('finished', { activeProcesses: active, forced, exitCode, reason });
         child.emit('close', 0);
       });
       return child;
@@ -91,6 +91,15 @@ test('job handshake는 실제 root PID와 빈 job 증거를 반환하고 private
   assert.doesNotMatch(JSON.stringify(finished), /SECRET_|token|settings/);
   await assert.rejects(readFile(fixture.settingsPath), { code: 'ENOENT' });
   assert.equal((await fixture.session.stop()).proof, 'windows_job_empty');
+});
+
+test('인증된 timeout handshake의 실행 상태를 일반 실패로 소실하지 않는다', async () => {
+  const fixture = fakeJob({ forced: true, exitCode: 1, reason: 'timed_out' });
+  const result = await fixture.session.finished;
+  assert.equal(result.state, 'timed_out');
+  assert.equal(result.forced, true);
+  assert.equal(result.treeTerminated, true);
+  assert.equal(result.proof, 'windows_job_empty');
 });
 
 test('잘못된 token·누락된 종료 handshake·남은 job 프로세스를 cleanup 성공으로 바꾸지 않는다', async () => {
@@ -192,6 +201,7 @@ test('실제 Windows runtime 제한 시간은 job 전체를 종료하고 종료 
   const session = createWindowsJobSession(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { ...options, timeoutMs: 80 });
   try {
     const started = await session.started, finished = await session.finished;
+    assert.equal(finished.state, 'timed_out');
     assert.equal(started.state, 'running'); assert.equal(finished.forced, true);
     assert.equal(finished.treeTerminated, true); assert.equal(finished.proof, 'windows_job_empty');
     await gone(started.pid);

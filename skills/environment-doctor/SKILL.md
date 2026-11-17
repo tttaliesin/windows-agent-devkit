@@ -1,6 +1,6 @@
 ---
 name: environment-doctor
-description: Windows 프로젝트의 Node.js·Python·Go·Rust·Zig·C# 개발환경, mise와 실행 경로를 변경 없이 점검하거나 권장 구성과의 차이를 설명할 때 사용합니다.
+description: Windows 프로젝트의 Node.js·Python·Go·Rust·Zig·C# 도구와 작업 실행기를 변경 없이 점검하거나 권장 구성과의 차이를 설명할 때 사용합니다.
 ---
 
 # Windows 개발환경 진단
@@ -25,6 +25,9 @@ node "<플러그인 루트>/dist/cli.mjs" doctor --project "<프로젝트 경로
 기본값은 프로젝트 선언에서 필요한 언어를 선택합니다.
 특정 계열의 점검을 요청받으면 `--languages node,python`처럼 범위를 명시합니다.
 Compose 보조 서비스와 devcontainer의 실행 위치를 구분합니다.
+mise tasks·Taskfile·Justfile·Makefile과 기존 npm scripts는 정적으로 탐지합니다.
+includes·import·지원하지 않는 동적 문법은 `unknown`으로 남깁니다.
+버전 조회 결과에 제품명 접두사가 있다고 가정하지 않습니다.
 유효한 devcontainer에서만 사용하는 언어를 호스트의 필수 설치로 제안하지 않습니다.
 호스트에서 직접 개발하는 요구를 확인하면 `--native`로 언어 도구 점검을 명시합니다.
 WSL 호스트 확인에는 `--wsl`을 사용합니다.
@@ -45,10 +48,16 @@ Process Compose 메타데이터 확인에는 `--process-compose`를 사용합니
 지원 계열과 최신 패치 적용 여부를 구분합니다.
 
 실제 선택된 실행 파일과 조회 버전을 근거로 설명합니다.
+최신 공식 문서의 셸 설정 구문은 실제 설치 버전의 지원 범위와 대조합니다.
 진단용 PowerShell의 관찰을 사용자 대화형 셸이나 앱 통합 터미널의 설정으로 일반화하지 않습니다.
 기존 관리자가 정상 동작해도 적용되는 mise 권장안과 유지 예외를 설명합니다.
 C#의 공식 .NET SDK 설치는 mise 권장 구성의 예외입니다.
 Nushell은 선택 도구입니다.
+
+신규 다중언어 프로젝트의 작업 실행기는 mise tasks를 기본 권장합니다.
+기존 Task·just·Make·npm scripts에는 권장 차이와 전환안 또는 유지 사유를 설명합니다.
+실행기 셸·작업 경로·실행 경로·요구·권장 차이는 SH-01·ENV-02·PATH-01·REQ-01·RCM-01의 기존 근거에 연결합니다.
+새 check ID와 필수 실행기·hook·마이그레이션을 추가하지 않습니다.
 
 ## 실행 경계
 
@@ -56,9 +65,13 @@ Nushell은 선택 도구입니다.
 관리자 proxy의 자동 다운로드나 환경 동기화를 유발하지 않습니다.
 WSL 배포판·컨테이너 엔진·TUI·개발 서비스를 기동하지 않습니다.
 Process Compose 설정의 명령이나 환경변수 표현을 평가하지 않습니다.
+실행기의 목록 조회와 dry run도 설정을 평가할 수 있으므로 자동 실행하지 않습니다.
+원시 명령 출력·환경 값·비밀 값은 보고서에 넣지 않습니다.
+정적 탐지로 실행 검증이나 서비스 준비 완료를 주장하지 않습니다.
 확인되지 않은 실행은 미확인 사유와 후속 확인 방법으로 설명합니다.
 전환을 요청받으면 진단 결과를 바탕으로 변경·보존·검증·복구 범위를 먼저 구체화합니다.
 설정 적용 요청은 `environment-setup` Skill의 plan·apply·rollback 절차로 연결합니다.
 서비스 기동이나 프로젝트 명령 실행 요청은 `environment-validate` Skill로 연결합니다.
 
 상세한 구현 범위는 `../../docs/diagnostic-cli.md`를 읽습니다.
+실행기 선택과 공식 자료의 확인일·적용 범위는 `../../docs/task-runners.md`를 읽습니다.

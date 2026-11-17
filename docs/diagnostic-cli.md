@@ -1,7 +1,8 @@
 # 진단 CLI 사용법
 
-이 문서는 0.2.1 CLI의 명령과 결과 해석 방법을 설명합니다.
+이 문서는 기존 CLI 계약과 0.3.0에서 추가하는 작업 실행기 사용법을 설명합니다.
 기준일은 2026-11-17입니다.
+0.3.0은 작업 실행기 연동을 포함합니다.
 실제 Windows 호스트와 Codex 앱에서의 확인 상태는 [검증 기록](verification.md)에서 구분합니다.
 
 ## 실행 전제조건
@@ -62,6 +63,12 @@ GitHub Actions의 정적 버전 행렬은 로컬 버전 요구와 구분합니�
 Python 가상환경과 Process Compose의 셸·경로·의존·건강 확인·포트는 정적 메타데이터로 기록합니다.
 외부 include, 지원하지 않는 동적 표현과 읽기 오류에는 구체적인 미확인 사유를 남깁니다.
 소스 코드와 선언에 들어 있는 명령·환경 값을 기본 분석에서 평가하지 않습니다.
+
+작업 실행기는 mise tasks·Taskfile·Justfile·Makefile과 기존 npm scripts의 선언을 정적으로 탐지합니다.
+includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `unknown`으로 남깁니다.
+파일이나 작업 이름의 발견은 해당 작업의 실행 성공을 뜻하지 않습니다.
+목록 조회와 dry run도 설정을 평가할 수 있으므로 자동 실행하지 않습니다.
+정적 탐지의 한계와 선택 기준은 [작업 실행기 가이드](task-runners.md)에 기록합니다.
 
 ## 변경 계획과 적용
 
@@ -138,17 +145,21 @@ Process Compose 검증은 선택한 설정과 서비스의 시작·준비 상태
 Rust 검증은 선택한 target에 임시 소스를 링크해 산출물을 확인합니다.
 기존 서비스·이미지·볼륨·프로세스는 정리 대상으로 삼지 않습니다.
 
-`--task-file <파일>`은 명시적으로 선택한 개발 작업을 전달합니다.
+`--task-file <파일>`은 명시적으로 선택한 개발 작업을 플러그인 JSON으로 전달합니다.
+Go Task의 Taskfile YAML을 전달하는 옵션이 아닙니다.
 호스트 작업은 `context: "native"`, `trusted: true`, 도구 이름과 문자열 인수 배열을 사용합니다.
-허용한 호스트 도구는 `node`, `npm`, `python`, `uv`, `go`, `cargo`, `rustc`, `zig`, `dotnet`, `pwsh`입니다.
-아래는 대상 프로젝트가 이미 `npm test`를 사용하는 경우의 `task.json` 예시입니다.
+기존 호스트 도구는 `node`, `npm`, `python`, `uv`, `go`, `cargo`, `rustc`, `zig`, `dotnet`, `pwsh`입니다.
+0.3.0은 `mise`, `task`, `just`, `make`를 선택 실행기로 추가합니다.
+아래는 대상 프로젝트에 선언된 mise의 `check` 작업을 선택하는 `task.json` 예시입니다.
 
 ```json
 {
   "context": "native",
-  "tool": "npm",
-  "args": ["test"],
-  "trusted": true
+  "tool": "mise",
+  "args": ["run", "check"],
+  "trusted": true,
+  "cwd": ".",
+  "env": {}
 }
 ```
 
@@ -156,13 +167,41 @@ Rust 검증은 선택한 target에 임시 소스를 링크해 산출물을 확�
 node src/cli.mjs validate --project 'C:/src/example' --execute --task-file task.json --format json
 ```
 
-호스트 작업은 대상 프로젝트의 작업 경로에서 실행합니다.
+| 선택한 기존 명령 | JSON의 `tool` | JSON의 `args` |
+| --- | --- | --- |
+| `mise run check` | `mise` | `["run", "check"]` |
+| `task check` | `task` | `["check"]` |
+| `just check` | `just` | `["check"]` |
+| `make check` | `make` | `["check"]` |
+| `npm test` | `npm` | `["test"]` |
+
+실제 프로젝트에 선언된 작업 이름과 인수를 선택합니다.
+설정 구문은 최신 공식 문서와 실제 실행기 버전의 지원 범위를 대조합니다.
+`cwd`를 생략하면 대상 프로젝트의 루트에서 실행합니다.
+선택 항목 `cwd`는 프로젝트 내부의 상대 경로나 절대 경로로 지정할 수 있습니다.
+프로젝트 밖의 경로를 실행 디렉터리로 사용하지 않습니다.
+선택 항목 `env`는 자식 작업에 전달할 환경 변수 이름과 문자열 값의 객체입니다.
+환경 값과 비밀 값은 보고서에 기록하지 않습니다.
+도구와 인수는 셸 문자열로 합성하지 않습니다.
 `context: "rust"`와 `context: "wsl"`은 해당 문맥의 실행 검증에서 사용합니다.
 작업의 문맥과 명령은 실행 전에 검토해야 합니다.
 작업 파일은 기본 `doctor`에서 실행하지 않습니다.
 호스트 작업의 `status`와 `exitCode`는 별도 `task` 필드에 기록합니다.
 원시 표준 출력과 표준 오류는 작업 보고서에 포함하지 않습니다.
 실제 호스트에서의 기동과 프로젝트 작업 성공 여부는 실행 결과로 별도 확인해야 합니다.
+
+플러그인 경유 mise 작업은 도구 자동 설치를 비활성화합니다.
+mise의 일반 기본값은 필요한 도구를 자동 설치할 수 있으므로 플러그인의 실행 제한과 구분합니다. [mise 설정](https://mise.jdx.dev/configuration/settings.html)
+`trusted: true`는 선택한 작업을 실행하겠다는 플러그인 입력입니다.
+플러그인은 별도의 `mise trust` 명령이나 신뢰 경로 확장을 추가하지 않습니다.
+mise 자체의 암묵적 신뢰 처리는 설치한 버전과 paranoid 설정을 따릅니다.
+설정 신뢰가 필요한 모드에서 실행이 거부되면 실패 결과를 그대로 보고합니다.
+Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드만으로 실패 원인을 확정하지 않습니다.
+명시한 작업을 실행하지 못해 `unknown`인 `validate --execute`도 종료 코드 1을 반환합니다.
+공유 mise 상태 경로가 샌드박스의 쓰기 범위 밖이면 작업 JSON의 `env.MISE_STATE_DIR`로 선택한 작업용 상태 경로를 지정할 수 있습니다.
+기존 상태 경로의 신뢰 기록은 새 경로로 자동 복사하지 않습니다.
+이 항목의 공식 자료 확인일은 2026-11-17입니다.
+셸 기본값·의존 작업·서비스 호출의 검토 방법은 [작업 실행기 가이드](task-runners.md)를 따릅니다.
 
 ## 옵션
 
@@ -184,7 +223,7 @@ node src/cli.mjs validate --project 'C:/src/example' --execute --task-file task.
 | `--compose-file <파일>`, `--services <목록>` | Compose 설정과 서비스 목록을 선택합니다. |
 | `--service-config <파일>` | Process Compose 설정을 선택합니다. |
 | `--rust-targets <목록>` | 검사할 설치된 Rust target을 쉼표 목록으로 선택합니다. |
-| `--task-file <파일>` | 선택한 문맥에서 실행할 작업을 전달합니다. |
+| `--task-file <파일>` | 선택한 문맥의 작업을 플러그인 JSON으로 전달하며 Go Task의 Taskfile은 받지 않습니다. |
 | `--app`, `--ide`, `--github-auth` | 앱·IDE·GitHub 인증의 선택적 점검을 요청합니다. |
 | `--storage <경로>` | 조회할 볼륨의 경로를 선택합니다. |
 | `--codex-executable <경로>` | 앱 설치 목록 조회에 사용할 Codex 네이티브 실행 파일을 명시합니다. |
@@ -203,6 +242,8 @@ node src/cli.mjs validate --project 'C:/src/example' --execute --task-file task.
 `doctor` 보고서는 기존 P0 22개와 P1 8개를 합친 30개 점검 ID를 사용합니다.
 실행 검증을 요청하지 않은 항목은 생략 또는 미확인으로 남습니다.
 `validate`도 30개 점검 보고서에 선택한 실행의 `validation` 근거와 별도 `task` 결과를 포함합니다.
+실행기의 셸·작업 경로·도구 경로·정적 요구·권장 차이는 SH-01·ENV-02·PATH-01·REQ-01·RCM-01에 연결합니다.
+실행기용 check ID나 필수 hook을 추가하지 않습니다.
 모든 점검 ID가 연결되었다는 사실은 모든 호스트 검증이 완료되었다는 뜻이 아닙니다.
 
 | 상태 | 의미 |
@@ -241,10 +282,11 @@ node scripts/check-package.mjs
 문서 링크와 패키지 검사는 실제 Windows 호스트의 전체 검증을 대신하지 않습니다.
 실제 호스트와 앱에서 확인한 범위는 아래 표로 구분합니다.
 
-## 현재 확인한 실행 결과
+## 0.2.1의 과거 실행 확인
 
 2026-11-17에 전달된 통합 검증 결과를 기준으로 기록합니다.
-현재 패키지와 소스 버전은 0.2.1입니다.
+아래 관찰의 대상은 0.2.1과 그 이전 버전입니다.
+이 결과를 0.3.0의 실행기·CI·테스트·앱 검증 완료로 확대하지 않습니다.
 앱의 최초 설치·발견·실제 호출을 확인한 버전은 0.2.0입니다.
 최신 0.2.1의 실제 앱 재호출을 완료했습니다.
 일반 샌드박스의 `use_default` 첫 실행에서 종료 코드 0을 확인했습니다.
@@ -290,4 +332,5 @@ node src/cli.mjs validate --project 'F:/workspace/project/tttaliesin/windows-age
 0.1.0은 P0 22개 ID의 제한된 정적 분석과 로컬 조회를 제공했습니다.
 당시에는 상위 선언·작업 공간·CI의 의미 분석과 설정 적용을 구현하지 않았습니다.
 P1 8개 ID와 실제 서비스 실행 검증도 후속 범위로 남겼습니다.
-이 설명은 이전 구현 이력이며 현재 기능의 기준은 위의 0.2.1 계약입니다.
+이 설명은 이전 구현 이력입니다.
+0.3.0의 실행기 추가 계약은 위의 선택 실행 절에 기록합니다.

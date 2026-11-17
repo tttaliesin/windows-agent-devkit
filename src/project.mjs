@@ -4,6 +4,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { parse as parseToml } from 'smol-toml';
 import { parseDocument } from 'yaml';
+import { analyzeTaskRunner, TASK_RUNNER_FILES, taskRunnerInvocation, taskRunnerTool } from './task-runners.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
 const MAX_BYTES = 256 * 1024;
@@ -117,7 +118,10 @@ function yamlDocument(text) {
 
 function description(name) {
   if (name === '.gitattributes' || name === '.editorconfig') return {};
-  if (name === 'package.json') return { languages: ['node'], parser: 'node' };
+  const runner = taskRunnerTool(name);
+  if (runner && runner !== 'npm' && runner !== 'mise') return { parser: 'taskRunner', taskRunner: runner };
+  if (name === 'mise-tasks') return { parser: 'miseFileTasks', taskRunner: 'mise' };
+  if (name === 'package.json') return { languages: ['node'], parser: 'node', taskRunner: 'npm' };
   if (has(NODE_LOCKS, name)) return { languages: ['node'], manager: NODE_LOCKS[name], lock: true };
   if (name === '.nvmrc' || name === '.node-version') return { languages: ['node'], parser: 'pin' };
   if (name === 'pyproject.toml') return { languages: ['python'], parser: 'python' };
@@ -136,7 +140,7 @@ function description(name) {
   if (name === 'build.zig') return { languages: ['zig'] };
   if (name === 'global.json') return { languages: ['dotnet'], parser: 'dotnet' };
   if (/\.(?:csproj|sln|slnx)$/i.test(name)) return { languages: ['dotnet'], manager: 'nuget' };
-  if (name === 'mise.toml' || name === '.mise.toml') return { languages: LANGUAGES, parser: 'mise', shared: true };
+  if (name === 'mise.toml' || name === '.mise.toml') return { languages: LANGUAGES, parser: 'mise', shared: true, taskRunner: 'mise' };
   if (name === '.tool-versions') return { languages: LANGUAGES, parser: 'tools', shared: true };
   if (name === 'pnpm-workspace.yaml' || name === 'pnpm-workspace.yml') return { languages: ['node'], parser: 'workspace' };
   if (name === 'pyvenv.cfg' || name === '.venv/pyvenv.cfg') return { languages: ['python'], parser: 'venv' };
@@ -154,7 +158,7 @@ export async function analyzeProject(projectPath) {
   }]));
   const metadata = {
     scope: { boundary: '.', boundaryKind: 'project', ancestorDirectories: [], maxDepth: MAX_DEPTH, maxFiles: MAX_FILES, maxBytes: MAX_BYTES },
-    declarations: [], workspaces: [], ci: [],
+    declarations: [], workspaces: [], ci: [], taskRunners: [], taskRunnerCI: [],
     processCompose: { source: null, sources: [], services: [], configurations: [], dynamicEnvironment: false },
     compose: { sources: [], services: [], configurations: [], dynamicEnvironment: false },
     dockerfiles: [],
@@ -163,6 +167,13 @@ export async function analyzeProject(projectPath) {
   const result = { root: null, requirements, environment: { containers: 'not_required', processCompose: 'not_required' }, files: [], issues: [], metadata };
   const issue = (source, message) => {
     if (!result.issues.some((entry) => entry.source === source && entry.message === message)) result.issues.push({ source, message });
+  };
+  const collectTaskRunner = (tool, source, text, reason) => {
+    const record = analyzeTaskRunner({ tool, source, text, reason });
+    if (!record) return;
+    const index = metadata.taskRunners.findIndex((entry) => entry.tool === tool && entry.source === source);
+    if (index < 0) metadata.taskRunners.push(record);
+    else metadata.taskRunners[index] = record;
   };
   const localLanguages = new Set();
   const mark = (language, local = true) => {
@@ -867,6 +878,10 @@ export async function analyzeProject(projectPath) {
       };
       if (job.steps !== undefined && !Array.isArray(job.steps)) { uncertain(entry, source, 'CI steps의 정적 목록을 확인할 수 없습니다.'); continue; }
       for (const [index, step] of (job.steps ?? []).entries()) {
+        if (object(step)) {
+          const invocation = taskRunnerInvocation(step.run);
+          if (invocation) metadata.taskRunnerCI.push({ source, job: id, step: index, ...invocation, executionLocation: entry.executionLocation });
+        }
         if (!object(step) || typeof step.uses !== 'string') continue;
         const action = step.uses.split('@')[0];
         if (!has(setups, action)) continue;
@@ -924,6 +939,7 @@ export async function analyzeProject(projectPath) {
   };
   function fail(item, message) {
     const { spec, source } = item;
+    if (spec.taskRunner) collectTaskRunner(spec.taskRunner, source, null, message);
     if (spec.parser === 'devcontainer') {
       metadata.devcontainer ??= { source, runtimeLocation: 'unknown', configurations: [] };
       metadata.devcontainer.runtimeLocation = 'unknown';
@@ -1078,6 +1094,7 @@ export async function analyzeProject(projectPath) {
           add(directory, name, description(name), 'workspace', distance);
           if (name !== 'package.json' && await exists(path.join(directory, 'package.json'))) add(directory, 'package.json', description('package.json'), 'workspace', distance);
           for (const lock of Object.keys(NODE_LOCKS)) if (await exists(path.join(directory, lock))) add(directory, lock, description(lock), 'workspace', distance);
+          for (const entry of await list(directory, directory)) if (TASK_RUNNER_FILES.includes(entry.name)) add(directory, entry.name, description(entry.name), 'workspace', distance);
         }
       }
       if (repository || workspace) { metadata.scope.boundaryKind = repository ? 'repository' : 'workspace'; break; }
@@ -1116,10 +1133,14 @@ export async function analyzeProject(projectPath) {
       const { source, spec } = item;
       declaration = { source, kind: spec.parser ?? 'marker', scope: item.scope, distance: item.distance, selectedLanguages: [] };
       metadata.declarations.push(declaration);
+      if (spec.parser === 'miseFileTasks') {
+        collectTaskRunner('mise', source, null, 'mise-tasks 파일 작업은 폴더 존재만 기록하며 내부 파일·링크·실행 의미는 분석하지 않습니다.');
+        continue;
+      }
       if (spec.shared) {
         const family = spec.parser === 'mise' ? 'mise' : 'asdf';
         item.spec = { ...spec, languages: spec.languages.filter((language) => canSelectVersion(family, language, source)) };
-        if (!item.spec.languages.length) continue;
+        if (!item.spec.languages.length && !spec.taskRunner) continue;
       }
       if (item.scope === 'ancestor' && !['mise', 'tools'].includes(spec.parser)) {
         const language = spec.languages[0];
@@ -1130,6 +1151,7 @@ export async function analyzeProject(projectPath) {
       if (spec.environment === 'containers' && result.environment.containers === 'not_required') result.environment.containers = 'unknown';
       const text = await read(item);
       if (text === null) continue;
+      if (spec.taskRunner) collectTaskRunner(spec.taskRunner, source, text);
       if (spec.manager) for (const language of spec.languages) manager(language, spec.manager, source);
       if (spec.lock) requirements[spec.languages[0]].lockFiles.push(source);
       if (spec.integrity) {
@@ -1143,6 +1165,7 @@ export async function analyzeProject(projectPath) {
       }
       try {
         if (spec.parser === 'pin') pin(text, source, spec.languages[0]);
+        else if (spec.parser === 'taskRunner') continue;
         else parsers[spec.parser](text, source);
       } catch { fail(item, '선언 파일의 정적 필드 분석을 완료할 수 없습니다.'); }
     }
@@ -1182,7 +1205,7 @@ export async function analyzeProject(projectPath) {
         const relative = portable(path.relative(base, directory));
         if (!memberOf(workspace.patterns, relative)) continue;
         workspace.members.push(sourceOf(directory));
-        for (const name of ['package.json', ...Object.keys(NODE_LOCKS)]) if (await exists(path.join(directory, name))) add(directory, name, description(name), 'workspace');
+        for (const entry of await list(directory, base)) if (TASK_RUNNER_FILES.includes(entry.name) || has(NODE_LOCKS, entry.name)) add(directory, entry.name, description(entry.name), 'workspace');
       }
     } catch { uncertain(workspace, workspace.source, '작업 공간의 폴더·링크·깊이·항목 한도를 확인하지 못하여 일부 구성원은 미확인입니다.'); }
   }

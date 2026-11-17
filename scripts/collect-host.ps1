@@ -29,7 +29,8 @@ try {
     'pwsh', 'powershell', 'git', 'winget', 'mise', 'node', 'npm', 'pnpm', 'yarn',
     'python', 'py', 'uv', 'go', 'rustup', 'rustc', 'cargo', 'zig', 'dotnet', 'wsl',
     'docker', 'lazydocker', 'process-compose', 'code', 'gh', 'rg', 'nu',
-    'fnm', 'nvm', 'pyenv', 'conda', 'choco', 'scoop', 'wt', 'codex', 'vswhere', 'fsutil'
+    'fnm', 'nvm', 'pyenv', 'conda', 'choco', 'scoop', 'wt', 'codex', 'vswhere', 'fsutil',
+    'task', 'just', 'make'
   )
   $commands = [ordered]@{}
   foreach ($name in $names) {

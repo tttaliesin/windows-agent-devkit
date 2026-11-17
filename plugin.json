@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "windows-agent-devkit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Windows 개발환경을 점검하고 요청한 구성 변경과 프로젝트 실행을 검증합니다.",
   "repository": "https://github.com/tttaliesin/windows-agent-devkit",
   "extensions": {
@@ -11,7 +11,10 @@
         "shortDescription": "Windows 개발환경 점검·설정·실행 검증",
         "developerName": "tttaliesin",
         "category": "Developer Tools",
-        "capabilities": ["Read", "Write"],
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
         "defaultPrompt": "현재 프로젝트의 Windows 개발환경을 점검해줘."
       }
     }

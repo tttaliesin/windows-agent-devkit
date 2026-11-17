@@ -9,6 +9,7 @@ export const INVENTORY_NAMES = Object.freeze([
   'python', 'py', 'uv', 'go', 'rustup', 'rustc', 'cargo', 'zig', 'dotnet', 'wsl',
   'docker', 'lazydocker', 'process-compose', 'code', 'gh', 'rg', 'nu',
   'fnm', 'nvm', 'pyenv', 'conda', 'choco', 'scoop', 'wt', 'codex', 'vswhere', 'fsutil',
+  'task', 'just', 'make',
 ]);
 
 const COLLECTOR = fileURLToPath(new URL('../scripts/collect-host.ps1', import.meta.url));
@@ -29,6 +30,9 @@ const QUERIES = Object.freeze({
   docker: [['--version']],
   gh: [['--version']],
   rg: [['--version']],
+  task: [['--version']],
+  just: [['--version']],
+  make: [['--version']],
 });
 
 const METADATA_ONLY_REASONS = {
@@ -47,6 +51,19 @@ function failure(code, message) {
 function envValue(environment, name) {
   const key = Object.keys(environment).find((key) => key.toUpperCase() === name.toUpperCase());
   return key === undefined ? undefined : environment[key];
+}
+
+export function isEnvironmentInjection(name) {
+  return /^(?:NODE_OPTIONS|NODE_PATH|PYTHONSTARTUP|PYTHONPATH|PYTHONHOME|DOTNET_STARTUP_HOOKS|DOTNET_ADDITIONAL_DEPS|DOTNET_SHARED_STORE|GIT_CONFIG(?:_.*)?|GIT_SSH(?:_COMMAND)?|GIT_EXEC_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|ZDOTDIR|PROMPT_COMMAND|PSModulePath|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTDOC|GOFLAGS|MAKEFLAGS|GNUMAKEFLAGS|MFLAGS|MAKEFILES|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_.*|RUBYOPT|PERL5OPT)$/i.test(name);
+}
+
+// Only mise's activation function may yield to an Application candidate.
+// Wrappers and shims still pass through the ordinary executable verification.
+export function selectCommandCandidate(name, candidates = []) {
+  if (name === 'mise' && candidates[0]?.commandType === 'Function') {
+    return candidates.find((candidate) => candidate.commandType === 'Application') ?? candidates[0];
+  }
+  return candidates[0];
 }
 
 // Inherit process essentials, not runtime hooks, credentials, config overrides or proxies.
@@ -70,6 +87,8 @@ export function createChildEnvironment(environment) {
     GOPROXY: 'off',
     RUSTUP_AUTO_INSTALL: '0',
     CARGO_NET_OFFLINE: 'true',
+    MISE_AUTO_INSTALL: '0',
+    MISE_TASK_RUN_AUTO_INSTALL: '0',
     DOTNET_CLI_TELEMETRY_OPTOUT: '1',
     DOTNET_NOLOGO: '1',
     DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0',
@@ -381,6 +400,9 @@ export function parseVersionOutput(name, args, output) {
     docker: new RegExp(`^Docker version (${VERSION_TOKEN})(?:,|\\s|$)`),
     gh: new RegExp(`^gh version (${VERSION_TOKEN})(?:\\s|$)`),
     rg: new RegExp(`^ripgrep (${VERSION_TOKEN})(?:\\s|$)`),
+    task: new RegExp(`^(?:Task version:\\s+)?v?(${VERSION_TOKEN})(?:\\s|$)`, 'i'),
+    just: new RegExp(`^just (${VERSION_TOKEN})(?:\\s|$)`),
+    make: new RegExp(`^GNU Make (${VERSION_TOKEN})(?:\\s|$)`),
     wsl: new RegExp(`^WSL[^:\\r\\n]*:\\s*(${VERSION_TOKEN})\\s*$`, 'im'),
   };
   const match = patterns[name]?.exec(name === 'wsl' ? text : firstLine);
@@ -474,9 +496,10 @@ export function createWindowsInspector({
           ?? '부작용을 검증한 고정 버전 조회가 없어 메타데이터만 수집했습니다.', candidates[0].path);
         continue;
       }
-      const checked = await verify(name, candidates[0], { ...options, commands: inventory.commands });
+      const candidate = selectCommandCandidate(name, candidates);
+      const checked = await verify(name, candidate, { ...options, commands: inventory.commands });
       if (!checked.executable) {
-        probes[name] = emptyProbe('not_run', checked.reason, candidates[0].path);
+        probes[name] = emptyProbe('not_run', checked.reason, candidate.path);
         continue;
       }
       const queries = [];

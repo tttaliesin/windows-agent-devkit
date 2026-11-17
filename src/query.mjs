@@ -2,13 +2,19 @@ import { mkdtemp, rm, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createChildEnvironment, runBounded, verifyExecutable, decodeOutput } from './windows.mjs';
+import { createChildEnvironment, runBounded, verifyExecutable, decodeOutput, isEnvironmentInjection, selectCommandCandidate } from './windows.mjs';
 import { startServiceSession } from './service-session.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SAFE_ROOT_VARIABLES = ['MISE_DATA_DIR', 'MISE_CONFIG_DIR', 'MISE_CACHE_DIR', 'RUSTUP_HOME', 'CARGO_HOME', 'DOTNET_ROOT', 'DOTNET_ROOT_X64', 'DOTNET_ROOT_X86', 'DOCKER_CONFIG', 'VSCODE_PORTABLE'];
-const mutatingTools = new Set(['winget', 'mise', 'docker', 'process-compose', 'wsl', 'rustup', 'rustc', 'npm', 'dotnet', 'go', 'cargo', 'node', 'python', 'pwsh', 'uv', 'zig']);
-const INJECTION = /^(NODE_OPTIONS|NODE_PATH|PYTHONSTARTUP|PYTHONPATH|DOTNET_STARTUP_HOOKS|DOTNET_ADDITIONAL_DEPS|DOTNET_SHARED_STORE|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)$/i;
+const mutatingTools = new Set(['winget', 'mise', 'docker', 'process-compose', 'wsl', 'rustup', 'rustc', 'npm', 'dotnet', 'go', 'cargo', 'node', 'python', 'pwsh', 'uv', 'zig', 'task', 'just', 'make']);
+const PROJECT_RUNNERS = new Set(['task', 'just', 'make']);
+
+function forceEnvironment(environment, values) {
+  const names = new Set(Object.keys(values).map((name) => name.toUpperCase()));
+  for (const name of Object.keys(environment)) if (names.has(name.toUpperCase())) delete environment[name];
+  return Object.assign(environment, values);
+}
 
 function envGet(environment, name) {
   return Object.entries(environment).find(([key]) => key.toUpperCase() === name)?.[1];
@@ -25,10 +31,10 @@ export function queryEnvironment(environment, { execute = false } = {}) {
     // Keep hooks/startup injection disabled while preserving project variables.
     Object.assign(child, environment);
     for (const name of Object.keys(child)) {
-      if (INJECTION.test(name)) delete child[name];
+      if (isEnvironmentInjection(name)) delete child[name];
     }
   }
-  return Object.assign(child, { MISE_OFFLINE: execute ? 'false' : 'true', MISE_AUTO_INSTALL: '0', COREPACK_ENABLE_NETWORK: execute ? '1' : '0', COREPACK_ENABLE_AUTO_PIN: '0', PNPM_PACKAGE_MANAGER_STRICT: 'false', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false' });
+  return forceEnvironment(child, { MISE_OFFLINE: execute ? 'false' : 'true', MISE_AUTO_INSTALL: '0', MISE_TASK_RUN_AUTO_INSTALL: '0', COREPACK_ENABLE_NETWORK: execute ? '1' : '0', COREPACK_ENABLE_AUTO_PIN: '0', PNPM_PACKAGE_MANAGER_STRICT: 'false', DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: 'false' });
 }
 
 function strippedArgs(tool, args) {
@@ -43,10 +49,10 @@ function strippedArgs(tool, args) {
 export function isReadOnlyQuery(tool, args) {
   if (!Array.isArray(args) || args.length > 80 || args.some((arg) => typeof arg !== 'string' || /[\0\r\n]/.test(arg))) return false;
   const words = strippedArgs(tool, args);
-  if (['node', 'python', 'rustc', 'cargo', 'rg', 'gh', 'winget', 'code', 'codex'].includes(tool) && words.length === 1 && words[0] === '--version') return true;
+  if (['node', 'python', 'rustc', 'cargo', 'rg', 'gh', 'winget', 'code', 'codex', 'task', 'just', 'make'].includes(tool) && words.length === 1 && words[0] === '--version') return true;
   if (tool === 'zig') return words.length === 1 && words[0] === 'version';
   if (tool === 'git') return ['--version', 'rev-parse', 'ls-files', 'check-attr'].includes(words[0]) || (words[0] === 'config' && words.some((word) => ['--get', '--get-all', '--get-regexp', '--list'].includes(word)));
-  if (tool === 'mise') return words[0] === '--version' || (words[0] === 'ls' && words.includes('--installed') && words.includes('--json')) || (words[0] === 'which' && words.length === 2 && ['node', 'python', 'go', 'rustc', 'cargo', 'zig', 'dotnet', 'uv', 'lazydocker', 'process-compose'].includes(words[1]));
+  if (tool === 'mise') return words.length === 1 && words[0] === '--version' || (words.length === 3 && words[0] === 'ls' && words.includes('--installed') && words.includes('--json')) || (words[0] === 'which' && words.length === 2 && ['node', 'python', 'go', 'rustc', 'cargo', 'zig', 'dotnet', 'uv', 'lazydocker', 'process-compose'].includes(words[1]));
   if (tool === 'dotnet') return words.length === 1 && ['--list-sdks', '--list-runtimes', '--version', '--info'].includes(words[0]);
   if (tool === 'docker') return words[0] === '--version' || ['show', 'inspect', 'ls'].includes(words[1]) && words[0] === 'context' || words[0] === 'compose' && words[1] === 'version';
   if (tool === 'docker-compose') return words[0] === 'version' && words.every((word) => ['version', '--short', '--format', 'json'].includes(word));
@@ -71,7 +77,7 @@ async function shimTarget(tool, candidate) {
   if (!candidate?.path || !/[\\/]shims[\\/]/i.test(candidate.path)) return candidate;
   try {
     const data = await readFile(candidate.path.replace(/\.(?:exe|cmd|ps1)$/i, '.shim'), 'utf8');
-    if (data.length > 8192 || /^args\s*=\s*(?!\[\]\s*$).+/m.test(data)) return candidate;
+    if (data.length > 8192 || [...data.matchAll(/^args[ \t]*=[ \t]*(.*)$/gm)].some((match) => match[1].trim() !== '[]')) return candidate;
     const match = /^path\s*=\s*"([^"\r\n]+)"\s*$/m.exec(data);
     if (match && isAbsolute(match[1]) && !/[%$]/.test(match[1])) return { ...candidate, path: match[1], commandType: 'Application', shimSource: candidate.path };
   } catch { /* Only verified sidecars may redirect a query. */ }
@@ -82,8 +88,11 @@ export function createQuery({ projectPath, host, timeoutMs = 5000, environment =
   return async function query(tool, args, options = {}) {
     if (options.signal?.aborted) return denied('취소된 조회입니다.', null, args);
     const execute = options.execute === true;
+    if (!Array.isArray(args) || args.length > 128 || args.some((arg) => typeof arg !== 'string' || /[\0\r\n]/.test(arg))) return denied('문자열 인수 배열이 필요합니다.');
     if ((!execute && !isReadOnlyQuery(tool, args)) || execute && !mutatingTools.has(tool)) return denied('허용한 조회 또는 명시적인 실행 작업이 아닙니다.', null, args);
-    let candidate = options.executable ? { name: `${tool}.exe`, commandType: 'Application', path: options.executable } : host?.commands?.[tool]?.[0];
+    if (execute && (PROJECT_RUNNERS.has(tool) && options.projectTask !== true
+      || tool === 'mise' && (options.projectTask === true && args[0] !== 'run' || args[0] === 'run' && options.projectTask !== true))) return denied('명시적인 프로젝트 작업 실행 경로가 필요합니다.', null, args);
+    let candidate = options.executable ? { name: `${tool}.exe`, commandType: 'Application', path: options.executable } : selectCommandCandidate(tool, host?.commands?.[tool]);
     if (!candidate && ['vswhere', 'fsutil'].includes(tool)) {
       const root = envGet(environment, tool === 'vswhere' ? 'PROGRAMFILES(X86)' : 'SYSTEMROOT');
       if (root && isAbsolute(root)) candidate = { name: `${tool}.exe`, commandType: 'Application', path: tool === 'vswhere' ? join(root, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe') : join(root, 'System32', 'fsutil.exe') };
@@ -116,9 +125,10 @@ export function createQuery({ projectPath, host, timeoutMs = 5000, environment =
     if (!assessment.executable) return denied(assessment.reason, candidate.path, args);
     candidate.path = assessment.executable;
     const cwd = options.cwd ?? projectPath;
-    const env = { ...queryEnvironment(environment, { execute }), ...options.env };
-    for (const name of Object.keys(env)) if (INJECTION.test(name)) delete env[name];
-    if (!execute) Object.assign(env, { MISE_OFFLINE: '1', MISE_AUTO_INSTALL: '0', MISE_NO_HOOKS: '1', MISE_NO_ENV: '1', COREPACK_ENABLE_NETWORK: '0', COREPACK_ENABLE_AUTO_PIN: '0' });
+    const env = forceEnvironment(queryEnvironment(environment, { execute }), options.env ?? {});
+    for (const name of Object.keys(env)) if (isEnvironmentInjection(name)) delete env[name];
+    forceEnvironment(env, { MISE_AUTO_INSTALL: '0', MISE_TASK_RUN_AUTO_INSTALL: '0' });
+    if (!execute) forceEnvironment(env, { MISE_OFFLINE: '1', MISE_NO_HOOKS: '1', MISE_NO_ENV: '1', COREPACK_ENABLE_NETWORK: '0', COREPACK_ENABLE_AUTO_PIN: '0' });
     let temporary;
     if (tool === 'dotnet' && ['--version', '--info'].includes(args[0])) {
       temporary = await mkdtemp(join(tmpdir(), 'windows-agent-devkit-dotnet-'));
@@ -130,7 +140,7 @@ export function createQuery({ projectPath, host, timeoutMs = 5000, environment =
       const response = execute && options.projectTask === true && process.platform === 'win32' && run === runBounded
         ? await startServiceSession(candidate.path, actualArgs, { cwd, env, signal: options.signal, timeoutMs: options.timeoutMs ?? timeoutMs, pwshPath: host?.context?.diagnosticShell?.path }).finished
         : await run(candidate.path, actualArgs, { cwd, env, signal: options.signal, timeoutMs: options.timeoutMs ?? timeoutMs, maxOutputBytes: options.maxOutputBytes ?? 256 * 1024 });
-      return { ...response, stdout: decodeOutput(response.stdout), stderr: decodeOutput(response.stderr), executable: candidate.path, arguments: actualArgs, resolutionMethod: appAlias ? 'explicit_windows_app_execution_alias' : candidate.shimSource ? 'shim-target-metadata' : 'direct-executable' };
+      return { ...response, stdout: options.projectTask === true ? '' : decodeOutput(response.stdout), stderr: options.projectTask === true ? '' : decodeOutput(response.stderr), executable: candidate.path, arguments: actualArgs, resolutionMethod: appAlias ? 'explicit_windows_app_execution_alias' : candidate.shimSource ? 'shim-target-metadata' : 'direct-executable' };
     } finally {
       if (temporary) {
         const absolute = await realpath(temporary);

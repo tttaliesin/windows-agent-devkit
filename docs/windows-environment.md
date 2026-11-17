@@ -28,6 +28,7 @@ Linux 실행 요구가 있으면 WSL 2 구성을 선택합니다.
 | Windows 관리 작업용 셸 | PowerShell 7.6 LTS의 지원 패치, 실행 명령은 `pwsh` | 지원 기간과 Windows cmdlet 작업을 기준으로 선택, 5.1 전용 모듈은 기존 문맥 보존 [지원 주기](https://learn.microsoft.com/en-us/lifecycle/products/powershell), [공존과 설치 방식](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows) | SH-01, PATH-01 |
 | 앱 설치 관리 | 일반 앱의 권장 설치 경로는 WinGet | App Installer에 연결되는 공식 경로, 기존 배포와 다르면 전환 범위와 유지 예외 확인 [WinGet](https://learn.microsoft.com/en-us/windows/package-manager/winget/) | PKG-01, PATH-01, RCM-01 |
 | 개발 도구 버전 관리 | 대상 도구의 Windows 지원을 확인한 mise | 언어 도구와 개발 CLI의 버전 선택 기준, 기존 관리자와 다르면 전환안 제안 [mise Windows 설치](https://mise.jdx.dev/installing-mise.html) | TOOLS-01, RCM-01 |
+| 프로젝트 작업 실행기 | 제약 없는 신규 다중언어 프로젝트는 mise tasks | 기존 Task·just·Make·npm scripts에는 권장 차이와 전환안 또는 유지 사유 제시 [작업 실행기 가이드](task-runners.md), [mise tasks](https://mise.jdx.dev/tasks/) | SH-01, ENV-02, PATH-01, REQ-01, RCM-01 |
 | 소스 관리 | Git for Windows | 네이티브 Git 명령과 Windows 인증 연계, 정상적인 기존 설치 재사용 [Git for Windows](https://gitforwindows.org/) | GIT-01 |
 | Git 인증 | 신규 HTTPS 구성은 Git Credential Manager | Git for Windows의 인증 도구, 기존 SSH·기업 인증은 별도 선택으로 유지 [GCM 안내](https://gitforwindows.org/), [인증 저장소](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/credstores.md) | GIT-01 |
 | 편집기 | 권장 편집기는 VS Code | 편집·터미널·디버깅·WSL 연계, 다른 IDE 사용은 요구와 사용자 선택에 따른 유지 예외 [Windows 설정](https://code.visualstudio.com/docs/setup/windows), [WSL 개발](https://code.visualstudio.com/docs/remote/wsl) | IDE-01, RCM-01 |
@@ -314,6 +315,34 @@ Docker의 백엔드별 파일 공유 조건은 같지 않습니다.
 WSL 2 백엔드의 경로 권고를 다른 백엔드에 일괄 적용하지 않습니다. [Docker 백엔드 조건](https://docs.docker.com/desktop/features/wsl/)
 Docker Desktop의 업무용 구독 적용 여부는 조직과 이용 조건을 확인해야 합니다. [Docker 이용 조건](https://docs.docker.com/subscription-billing/desktop-license/)
 플러그인은 CLI 버전이나 회사 계정 존재만으로 계약 상태를 확정하지 않습니다.
+
+## 프로젝트 작업 실행기의 선택
+
+신규 다중언어 프로젝트에는 mise tasks를 기본 권장합니다.
+도구 버전 선언과 공통 명령 진입점을 함께 관리하려는 저장소의 선택입니다.
+기존 Task·just·Make·npm scripts는 현재 프로젝트의 계약을 우선합니다.
+전환안에는 기존 명령·잠금 파일·셸·CI·배포 경로의 보존 범위를 설명합니다.
+기존 구성을 유지하면 이유와 적용 범위를 기록합니다.
+실행기의 필수 설치·자동 변환·새 hook·필수 마이그레이션을 추가하지 않습니다.
+
+mise도 작업 의존 순서와 캐시 기능을 지원합니다.
+Task만 그 기능을 제공한다고 비교하지 않습니다. [mise 작업 설정](https://mise.jdx.dev/tasks/task-configuration.html)
+PowerShell에서 실행기를 호출해도 내부 작업 셸이 PowerShell이라고 가정하지 않습니다.
+Windows의 Task는 내장 셸을 사용합니다.
+just의 기본 셸은 `sh`입니다.
+mise의 Windows 기본 인라인 셸은 `cmd /c`입니다.
+PowerShell 작업은 `pwsh`를 명시합니다.
+각 기본값의 공식 근거와 설정 예시는 [작업 실행기 가이드](task-runners.md#windows에서-셸을-구분하는-방법)에 기록합니다.
+
+기본 진단은 실행기 설정을 정적으로 탐지합니다.
+includes와 지원하지 않는 동적 문법은 미확인으로 남깁니다.
+목록 조회와 dry run도 설정을 평가할 수 있으므로 자동 실행하지 않습니다.
+명시적으로 선택한 작업은 `validate --execute`와 별도 `task` 결과로 확인합니다.
+mise의 도구 자동 설치는 플러그인 경유 실행에서 비활성화합니다.
+설정 신뢰를 자동 승격하지 않습니다.
+이 권장안의 공식 자료 확인일은 2026-11-17입니다.
+플러그인 연동은 0.3.0의 추가 범위입니다.
+이번 통합의 실행·CI·앱 검증 완료를 뜻하지 않습니다.
 
 ## 개발 중 서비스 관리
 
