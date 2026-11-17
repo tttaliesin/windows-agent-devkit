@@ -3,7 +3,7 @@
 ## Scope
 
 This repository contains a Windows development-environment proposal and a local Codex plugin project.
-The current stage is the first read-only diagnostics CLI and local plugin-source implementation.
+The implementation includes read-only diagnostics, reviewed setup and rollback, scoped execution validation, and a bundled local plugin package.
 Read README.md and the relevant document under docs/ before changing behavior.
 Keep planned features separate from implemented and verified features.
 

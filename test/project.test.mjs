@@ -305,7 +305,7 @@ test('잘못되거나 지원하지 않는 선언은 관련 언어를 미확인�
     ['node', 'mise.toml', '[tools]\nnode = "{{ env.선언비밀 }}"\n'],
     ['python', 'mise.toml', '[tools]\npython = { version = "3.13", postinstall = "선언비밀" }\n'],
     ['node', 'mise.toml', '[tools.node]\n'],
-    ['python', 'environment.yml', 'dependencies: [python=3.13]\n'],
+    ['python', 'environment.yml', 'dependencies: "${선언비밀}"\n'],
     ['python', 'environment.yml', 'dependencies:\n  - "python=3.13\n'],
     ['rust', '.tool-versions', 'rust ref:선언비밀\n'],
   ];
@@ -336,15 +336,16 @@ test('mise 전체 문법 오류와 외부 include는 추가 언어 요구를 없
   }
 });
 
-test('요청 루트의 하위 소스·의존성과 상위 SDK 선언은 탐색하지 않는다', async (t) => {
+test('하위 소스·의존성은 탐색하지 않으며 상위 SDK 선언은 경계 안에서 찾는다', async (t) => {
   const root = await fixture(t, {
     'global.json': { sdk: { version: '10.0.100' } }, 'child/README.md': '문서',
     'child/src/package.json': { engines: { node: '24' } }, 'child/node_modules/python/pyproject.toml': '[project]\nrequires-python=">=3.13"',
     'child/.env': 'TOKEN=루트비밀',
   });
   const result = await analyzeProject(path.join(root, 'child'));
-  assert.deepEqual(result.files, []);
-  assert.ok(Object.values(result.requirements).every((entry) => entry.state === 'not_required'));
+  assert.deepEqual(result.files, ['../global.json']);
+  assert.deepEqual(result.requirements.dotnet.versionRequests, [request('../global.json', 'sdk.version', 'sdk', '10.0.100')]);
+  assert.ok(Object.entries(result.requirements).filter(([language]) => language !== 'dotnet').every(([, entry]) => entry.state === 'not_required'));
 });
 
 test('Go의 주석·경로 문자열과 의존성 블록에서 가짜 버전 지시문을 추출하지 않는다', async (t) => {

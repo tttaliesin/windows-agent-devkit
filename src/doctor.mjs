@@ -2,8 +2,17 @@ import { realpath, stat } from 'node:fs/promises';
 import { analyzeProject } from './project.mjs';
 import { inspectWindows } from './windows.mjs';
 import { evaluateVersion } from './versions.mjs';
+import { createQuery } from './query.mjs';
+import { collectAdvanced } from './advanced.mjs';
+import { collectInfrastructure } from './infrastructure.mjs';
+import { validateEnvironment } from './validation.mjs';
+import { enhanceRuntimes } from './runtime.mjs';
+import { attachSupport } from './support.mjs';
+import { loadExceptions } from './configure.mjs';
+import { checkApp } from './app-check.mjs';
+import { runProjectTask } from './task.mjs';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.1';
 export const P0_IDS = ['ENV-01', 'ENV-02', 'SH-01', 'PATH-01', 'REQ-01', 'PKG-01', 'GIT-01', 'GIT-02', 'NODE-01', 'NODE-02', 'PY-01', 'PY-02', 'GO-01', 'RUST-01', 'ZIG-01', 'DOTNET-01', 'TOOLS-01', 'WSL-01', 'CTR-01', 'LD-01', 'PC-01', 'RCM-01'];
 export const P1_IDS = ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02', 'IDE-01', 'CODEX-01', 'AUX-01', 'STORE-01'];
 const LANGUAGE_TOOLS = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
@@ -36,6 +45,7 @@ function toolEvidence(host, name) {
     execution: ['succeeded', 'failed', 'timed_out'].includes(query?.state) ? query.state : 'not_run',
     command: query ? { executable: query.executable, arguments: query.arguments, exitCode: query.exitCode } : null,
     observed: query?.version ?? entry?.productVersion ?? entry?.fileVersion ?? null,
+    method: query?.method ?? 'verified_version_query',
   };
 }
 
@@ -52,11 +62,11 @@ function languageCheck(language, requirement, host) {
   if (requirement.state === 'unknown') return result(id, 'unknown', 'requirement_unknown', '프로젝트 선언을 해석하지 못해 적용 요구를 확인할 수 없습니다.', { ...common, applicability: 'unknown' });
   if (evidence.resolution === 'not_resolved') return result(id, 'fail', 'command_not_resolved', `${LABELS[language]} 요구가 있으나 현재 진단 문맥에서 명령을 찾지 못했습니다.`, { ...common, compatibility: 'violated', nextAction: '설치 상태와 PATH를 구분해 확인하고 프로젝트 지정 도구의 실행 경로를 준비합니다.' });
   const query = probe(host, name);
-  if (query?.state !== 'succeeded' || !query.version) return result(id, 'unknown', query?.state ?? 'version_not_queried', query?.reason ?? '현재 경로의 실행 버전을 변경 없이 확인하지 못했습니다.', common);
+  if ((query?.state !== 'succeeded' && !query?.versionVerified) || !query.version) return result(id, 'unknown', query?.state ?? 'version_not_queried', query?.reason ?? '현재 경로의 실행 버전을 변경 없이 확인하지 못했습니다.', common);
   const assessment = evaluateVersion(query.version, requirement.versionRequests, { ...requirement.metadata, language });
-  if (assessment.reason === 'no_version_requirement') return result(id, 'pass', 'runtime_queried', `${LABELS[language]} 실행 버전을 확인했습니다. 현재 정적 분석 범위에서 명시적인 버전 범위는 확인되지 않았습니다.`, { ...common, compatibility: 'satisfied' });
+  if (assessment.reason === 'no_version_requirement') return result(id, 'pass', query.method === 'pe_go_buildinfo' ? 'runtime_metadata_observed' : 'runtime_queried', `${LABELS[language]} 버전을 확인했습니다. 현재 정적 분석 범위에서 명시적인 버전 범위는 확인되지 않았습니다.`, { ...common, compatibility: 'satisfied' });
   const status = assessment.compatibility === 'satisfied' ? 'pass' : assessment.compatibility === 'violated' ? 'fail' : 'unknown';
-  const message = status === 'pass' ? '실제 실행 버전이 지원하는 선언 범위를 충족합니다.' : status === 'fail' ? '실제 실행 버전이 프로젝트 선언 범위를 벗어납니다.' : '이 버전 표현은 첫 구현의 비교 범위 밖입니다.';
+  const message = status === 'pass' ? '확인한 도구 버전이 프로젝트의 선언 범위를 충족합니다.' : status === 'fail' ? '확인한 도구 버전이 프로젝트의 선언 범위를 벗어납니다.' : '버전 표현이나 선택 근거를 충분히 확인하지 못했습니다.';
   return result(id, status, assessment.reason, message, { ...common, compatibility: assessment.compatibility, nextAction: status === 'fail' ? '기존 관리자에서 프로젝트 지정 버전을 선택한 뒤 다시 확인합니다.' : '공식 지원 상태와 실제 빌드·테스트는 별도로 확인합니다.' });
 }
 
@@ -76,6 +86,14 @@ function effectiveRequirements(project, options) {
   const requirements = structuredClone(project.requirements);
   for (const language of options.languages ?? []) {
     if (requirements[language].state === 'not_required') requirements[language].state = 'required';
+  }
+  if (project.metadata?.execution?.hostLanguages) {
+    for (const [language, requirement] of Object.entries(requirements)) {
+      if (options.native || options.languages?.includes(language)) continue;
+      const state = project.metadata.execution.hostLanguages[language];
+      if (state === 'not_required' || state === 'unknown') requirement.state = state;
+    }
+    return requirements;
   }
   if (!options.native && project.environment.containers !== 'not_required') {
     for (const [language, requirement] of Object.entries(requirements)) {
@@ -135,11 +153,48 @@ export function buildReport(project, host, options = {}) {
   return { schemaVersion: 1, pluginVersion: VERSION, policyVersion: '2026-11-17', generatedAt: new Date().toISOString(), context: host.context, project: { root: project.root, files: project.files }, summary, checks, deferredChecks: P1_IDS, limitations: ['공식 지원 상태는 자동 조회하지 않아 unknown으로 기록합니다.', '지원하지 않는 선언과 버전 표현은 unknown으로 기록합니다.', '진단 셸의 관찰을 사용자 프로필이나 앱 터미널의 관찰로 일반화하지 않습니다.', '이 보고서는 전체 빌드·테스트와 앱에서의 플러그인 로딩 검증을 대신하지 않습니다.'] };
 }
 
-export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], wsl = false, containers = false, processCompose = false, native = false, inspect = inspectWindows } = {}) {
+export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], wsl = false, containers = false, processCompose = false, native = false, inspect = inspectWindows, query: suppliedQuery, ...options } = {}) {
   const root = await realpath(projectPath ?? process.cwd());
   if (!(await stat(root)).isDirectory()) throw new Error('점검할 프로젝트 경로는 디렉터리여야 합니다.');
   const project = await analyzeProject(root);
   const active = Object.entries(effectiveRequirements(project, { languages, native })).filter(([, item]) => item.state === 'required').map(([name]) => LANGUAGE_TOOLS[name]);
-  const host = await inspect({ projectPath: root, timeoutMs, tools: ['git', ...active, ...(wsl ? ['wsl'] : []), ...(containers || project.environment.containers === 'required' ? ['docker'] : [])] });
-  return buildReport(project, host, { languages, wsl, containers, processCompose, native });
+  const host = await inspect({ projectPath: root, timeoutMs, tools: ['git', ...active, ...(wsl || options.distro ? ['wsl'] : []), ...(containers || project.environment.containers === 'required' ? ['docker'] : [])] });
+  const query = suppliedQuery ?? createQuery({ projectPath: root, host, timeoutMs });
+  await enhanceRuntimes({ project, host, tools: active, query });
+  const report = buildReport(project, host, { languages, wsl, containers, processCompose, native });
+  const effective = { ...project, requirements: effectiveRequirements(project, { languages, native }), metadata: structuredClone(project.metadata ?? {}) };
+  if (options.ide) (effective.metadata.ide ??= {}).required = true;
+  if (options.storage) effective.metadata.storage = { requested: true, path: typeof options.storage === 'string' ? options.storage : root };
+  if (options.githubAuth) effective.metadata.auxiliary = { github: true, authentication: true };
+  const [advanced, infrastructure, validation, app] = await Promise.all([
+    collectAdvanced({ projectPath: root, project: effective, host, timeoutMs, query }),
+    collectInfrastructure({ project: effective, host, options: { ...options, wsl, containers, processCompose }, query }),
+    validateEnvironment({ projectPath: root, project: effective, host, options: { ...options, timeoutMs }, query }),
+    checkApp({ query, enabled: options.app, executable: options.codexExecutable }),
+  ]);
+  const map = new Map(report.checks.map((item) => [item.checkId, item]));
+  for (const item of [...advanced.checks, ...infrastructure.checks, ...validation.checks, app]) map.set(item.checkId, item);
+  const ids = [...P0_IDS, ...P1_IDS];
+  report.checks = ids.map((id) => map.get(id));
+  attachSupport(report.checks, host, options.now);
+  report.summary = Object.fromEntries(['pass', 'fail', 'warn', 'unknown', 'skipped'].map((status) => [status, report.checks.filter((check) => check.status === status).length]));
+  report.deferredChecks = [];
+  report.project.scope = project.metadata?.scope;
+  report.project.execution = project.metadata?.execution;
+  const reqCheck = map.get('REQ-01');
+  reqCheck.observed.scope = project.metadata?.scope ?? 'bounded static declarations';
+  reqCheck.observed.execution = project.metadata?.execution;
+  report.validation = validation.evidence;
+  report.task = await runProjectTask({ projectPath: root, task: options.task, execute: options.execute, query, timeoutMs });
+  try { report.exceptions = await loadExceptions({ projectPath: root, stateDir: options.stateDir }); }
+  catch (error) { report.exceptions = { state: 'unknown', reason: error.code ?? 'exception_state_unreadable' }; }
+  const recommendation = map.get('RCM-01');
+  recommendation.observed = recommendation.observed.filter((i) => i.role !== '개발 도구 관리');
+  if (map.get('TOOLS-01').status !== 'skipped') recommendation.observed.push({ role: '개발 도구 관리', expected: 'mise', observed: map.get('TOOLS-01').observed?.version ?? null, status: map.get('TOOLS-01').recommendation.status });
+  recommendation.observed.push({ role: '터미널', expected: 'Windows Terminal', observed: candidates(host, 'wt'), status: discovered(host, 'wt') ? 'aligned' : 'unknown' });
+  recommendation.recommendation.status = recommendation.observed.some((i) => i.status === 'different') ? 'different' : recommendation.observed.some((i) => i.status === 'unknown') ? 'unknown' : 'aligned';
+  recommendation.status = recommendation.recommendation.status === 'different' ? 'warn' : recommendation.recommendation.status === 'unknown' ? 'unknown' : 'pass';
+  recommendation.exceptions = report.exceptions;
+  report.limitations = ['지원 정책은 2026-11-17의 오프라인 스냅샷이며 30일 후에는 미확인으로 처리합니다.', '지원 계열 판정은 최신 패치·취약점·모든 OS 지원 조합의 확인을 포함하지 않습니다.', '기본 진단은 프로젝트 명령·배포판 내부·컨테이너·서비스를 실행하지 않습니다.', '앱 설치 목록과 실제 Skill 호출의 관찰은 구분합니다.'];
+  return report;
 }

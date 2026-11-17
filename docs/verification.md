@@ -1,55 +1,192 @@
-# 첫 진단 CLI의 실행 검증 기록
+# 0.2.1 구현의 검증 기록
 
-이 문서는 0.1.0 첫 CLI에서 실제로 확인한 결과를 기록합니다.
+이 문서는 구현한 기능의 자동 검사와 실제 실행 결과를 구분해 기록합니다.
 검증일은 2026-11-17입니다.
-실행 환경은 Windows x64, Node.js 24.18.1과 PowerShell 7.6.9입니다.
+로컬 호스트는 Windows 11 Pro x64의 build 26300입니다.
+진단 실행에는 Node.js 24.18.1과 PowerShell 7.6.9를 사용했습니다.
 
-## 자동 테스트
+## 확인 범위
+
+| 대상 | 실제 확인한 결과 | 확인 범위의 한계 |
+| --- | --- | --- |
+| 기본 진단 | 30개 고유 ID와 상태 집계를 반환했습니다. | 특정 PC의 집계가 다른 PC의 기대값은 아닙니다. |
+| 언어 도구 | Node.js 24.18.1과 Python 3.14.6을 실행했습니다. | 여섯 언어의 모든 빌드 조합을 실행하지 않았습니다. |
+| Go | 실제 PE 파일의 내장 버전 go1.26.5를 읽었습니다. | Go 프로세스와 telemetry를 실행하지 않았습니다. |
+| 설정 | 임시 프로젝트에서 계획·미리보기·적용·재적용·복구가 통과했습니다. | 사용자 실프로필과 전역 설치를 변경하지 않았습니다. |
+| 개발 명령 | 기존 npm 스크립트를 실행하고 생성 결과를 확인했습니다. | 원시 명령 출력은 보고서에 복사하지 않습니다. |
+| 유지 예외 | 저장한 프로젝트·역할 예외를 다음 doctor에서 확인했습니다. | 다른 프로젝트에 전역 적용하지 않습니다. |
+| WSL | 기존 Ubuntu-24.04의 Linux 경로와 Bash 5.2.21 조회가 통과했습니다. | 여섯 언어 전체의 WSL 개발환경을 설치하거나 검증하지 않았습니다. |
+| Process Compose | 실제 서비스의 시작·준비 검사·종료가 모두 통과했습니다. | 선택한 서비스와 해당 릴리스의 관찰입니다. |
+| 앱 | 0.2.1 설치·활성화·Skill 발견·설치본의 실제 CLI 호출을 확인했습니다. | 공개 디렉터리 등록과 게시를 수행하지 않았습니다. |
+| Docker | 현재 Windows PATH에서 명령이 해석되지 않는 실제 실패 경로를 확인했습니다. | 실제 엔진·이미지·Compose 기동은 검증하지 않았습니다. |
+
+## 자동 검사
 
 ```powershell
+npm ci --ignore-scripts
+node scripts/build.mjs
 node --test
 node scripts/check-package.mjs
+node scripts/package-plugin.mjs
+node scripts/check-package.mjs --packaged
 ```
 
-첫 전체 실행에서 테스트 72개 중 71개가 통과했습니다.
-실패는 0개였습니다.
-파일 심볼릭 링크를 생성하는 테스트 1개는 현재 Windows 권한 때문에 생략됐습니다.
-디렉터리 정션의 외부 경로 차단 테스트는 통과했습니다.
-기본 플러그인 형식·Skill·참조 파일과 문서 링크 23개 검사는 통과했습니다.
+로컬 전체 테스트는 265개 중 262개가 통과했습니다.
+실패는 0개입니다.
+파일 심볼릭 링크 생성 권한이 필요한 3개는 생략했습니다.
+디렉터리 정션과 경계 밖 경로 차단 검사는 통과했습니다.
+Windows CI의 결과는 해당 커밋의 실행 결과로 별도 확인합니다.
 
-## 실제 CLI 실행
+파서 검사는 상위 선언·작업 공간·CI·가상환경·설정 파일 오류를 포함합니다.
+버전 검사는 Node의 semver와 Python의 PEP 440을 구분합니다.
+동일 관리자 선언에 여러 버전이 있으면 선택 근거가 부족한 비교를 미확인으로 남깁니다.
+독립적인 다른 버전 요구의 확인된 위반은 계속 보고합니다.
+변조 계획·오래된 입력·재실행·부분 실패·복구·동시 편집 경합도 검사합니다.
+Docker의 성공·실패·지연 생성·소유권 확인·정리 시나리오는 모의 query로 검사합니다.
 
-이 저장소를 대상으로 JSON 보고서를 생성했습니다.
-P0 22개 ID와 후속 P1 ID 8개가 반환됐습니다.
-관찰한 결과는 통과 6개·요구 위반 0개·검토 0개·미확인 6개·생략 10개였습니다.
-Node.js의 실제 실행 버전 24.18.1이 저장소의 `>=24.0.0` 요구를 충족했습니다.
-이 집계는 해당 시점의 호스트 관찰이며 다른 PC의 기대값으로 고정하지 않습니다.
+설치 패키지 검사는 node_modules가 없는 임시 위치로 실제 번들을 복사해 실행합니다.
+표준 파서와 버전 비교가 번들 안에서 동작하는지 확인합니다.
+Windows 수집기와 함께 배포하는 지원 파일의 경로도 실제로 확인합니다.
+고정한 실행 의존성과 포함한 서드파티 라이선스를 대조합니다.
 
-임시 프로젝트에는 여섯 언어의 선언과 Process Compose 설정을 작성했습니다.
-Node.js 요구를 `>=99 <100`으로 지정한 뒤 실제 버전 위반과 종료 코드 1을 확인했습니다.
-Python의 `>=3.14,<3.15` 요구는 실제 3.14.6으로 통과했습니다.
-조회하지 않은 Go와 선택 SDK가 미확인인 항목은 통과로 처리하지 않았습니다.
-현재 문맥에서 명령이 해석되지 않은 경우는 설치 부재와 구분해 기록했습니다.
-진단 전후 임시 프로젝트의 파일 목록과 SHA-256 해시는 같았습니다.
-`.env`의 테스트 표식은 보고서에 포함되지 않았습니다.
-보고서는 Git에서 제외한 `.local` 경로에 저장했습니다.
+## 실제 설정과 프로젝트 명령
 
-## PATHEXT 회귀 사례
+```powershell
+node scripts/smoke-windows.mjs
+```
 
-자식 환경에서 `PATHEXT`를 누락한 첫 실행에서는 설치된 명령 후보를 찾지 못했습니다.
-같은 PATH·작업 경로·수집기에서 `PATHEXT`의 유무만 바꿔 조회했습니다.
-`PATHEXT`가 없으면 Node 후보 0개였습니다.
-기존 값을 보존하면 Node 후보 3개였습니다.
-두 조건 모두 대상 도구의 버전 명령은 실행하지 않았습니다.
-자식 환경에 기존 `PATHEXT`를 보존하도록 수정하고 회귀 테스트를 추가했습니다.
+이 명령은 저장소 밖의 통제된 임시 프로젝트와 개인 상태 경로를 만듭니다.
+기존 내용이 있는 임시 PowerShell 프로필을 사용합니다.
+실행 전과 복구 후의 프로필 바이트가 일치하는지 검사합니다.
+설치 작업을 선택하지 않고 mise 선언과 프로필 관리 블록만 적용합니다.
+같은 계획의 두 번째 적용이 already_applied인지 검사합니다.
+프로젝트에 넣은 가짜 인증 표식이 보고서에 노출되지 않는지도 검사합니다.
 
-재현에는 `createWindowsInspector`의 `environment` 인수로 기존 환경과 `PATHEXT`만 제거한 환경을 각각 전달합니다.
-`tools: []`와 같은 프로젝트 경로로 메타데이터만 조회합니다.
-두 조건의 후보 수가 같거나 제거 조건에서도 정상 탐색되면 해당 호스트에서는 이 원인 가설을 기각합니다.
+신뢰한 task JSON으로 실제 npm 프로젝트 스크립트를 실행했습니다.
+프로젝트 명령이 생성한 파일을 확인했습니다.
+해당 실행의 정리 결과는 confirmed: true와 proof: windows_job_empty였습니다.
+이미 설치된 .NET SDK가 있는 호스트에서는 같은 smoke가 global.json으로 정확한 SDK를 선택하는 검사도 수행합니다.
+SDK 명령이 없으면 해당 실제 검사는 생략합니다.
 
-## 검증 범위
+원래 파일은 교체 전에 고유한 복구 경로로 포착합니다.
+포착한 해시와 배타적 게시 결과를 확인합니다.
+포착 파일은 성공 이후에도 보관합니다.
+이 절차는 일반 파일 API의 손실 방지 절차이며 원자적 CAS를 보장하지 않습니다.
+이동 전에 열린 핸들의 늦은 쓰기는 포착 파일에 남을 수 있습니다.
+복구 경로와 충돌은 저널에서 확인할 수 있습니다.
 
-수집기와 보고서의 확인 범위는 [진단 CLI 사용법](diagnostic-cli.md)에 기록합니다.
-모든 Go·Rust·Zig·.NET 버전 조회를 실제 호스트에서 검증한 것은 아닙니다.
-WSL 배포판·Docker 엔진·TUI·개발 서비스의 실제 실행은 수행하지 않았습니다.
-공식 지원 상태의 자동 판정과 앱에서의 플러그인 설치·발견·호출은 검증하지 않았습니다.
+## 실제 Process Compose
+
+검증에는 공식 v1.124.0 Windows amd64 릴리스를 사용했습니다.
+받은 ZIP의 SHA-256을 공식 릴리스 asset digest와 대조했습니다.
+바이너리는 전역 설치 대신 Git에서 제외한 .local/tools 아래에 보관했습니다.
+
+```text
+a77d51dcb34e3e8d2b88af372ada7ca8a62cb87f0c6af0f78834c0fd6c95e2a7
+```
+
+```powershell
+node scripts/smoke-windows.mjs --process-compose-executable '<검증한 process-compose.exe의 절대 경로>'
+```
+
+임시 Node 서비스가 출력하는 준비 표식으로 ready_log_line을 검사했습니다.
+서비스의 시작과 준비 완료가 각각 pass였습니다.
+고유 API 포트와 토큰 파일을 사용했습니다.
+정상 down 이후 종료 코드 0과 forced: false를 확인했습니다.
+정리 근거는 treeTerminated: true와 proof: windows_job_empty입니다.
+같은 검증의 pendingQueries는 0이었습니다.
+
+Windows Job Object는 소유한 root와 하위 프로세스를 함께 관리합니다.
+실제 Windows 테스트에는 부모 선행 종료, detached 자식, AbortSignal, 실행 제한 시간과 helper 강제 종료가 포함됩니다.
+빈 Job handshake가 없는 helper 종료는 정리 성공으로 바꾸지 않습니다.
+관련 테스트 11개 중 6개는 실제 Windows 프로세스를 실행했습니다.
+
+```mermaid
+sequenceDiagram
+    participant V as 실행 검증
+    participant J as 전용 Windows Job
+    participant P as Process Compose
+    V->>J: 소유 세션 생성
+    J->>P: 중단 상태 생성 후 실행 재개
+    V->>P: 고유 포트·토큰으로 준비 확인
+    P-->>V: 선택 서비스 Ready
+    V->>P: down
+    P-->>J: 종료 코드 0
+    J-->>V: 활성 프로세스 0과 종료 handshake
+```
+
+shell_argument가 한 argv 요소로 전달되는 실제 동작도 확인했습니다.
+여러 PowerShell 옵션을 하나의 문자열로 지정한 사례는 서비스 실행에 실패했습니다.
+실제 fixture에는 shell_argument: -Command를 사용했습니다.
+정적 분석은 여러 인수를 임의로 분리해 정상 설정으로 판정하지 않습니다.
+이 관찰은 [v1.124.0 셸 설정 타입](https://github.com/F1bonacc1/process-compose/blob/v1.124.0/src/command/config.go)과 함께 확인했습니다.
+
+## 실제 WSL과 Docker 경계
+
+기존 Ubuntu-24.04 배포판의 대상 저장소 경로를 Linux 절대 경로로 명시했습니다.
+--linux-tools bash로 이번 검증 도구를 한정했습니다.
+실제 OS는 Linux, 아키텍처는 x86_64였습니다.
+Linux 셸은 /usr/bin/sh, Bash는 /usr/bin/bash의 5.2.21이었습니다.
+WSL-02는 pass였습니다.
+검증을 위해 새 배포판이나 언어 도구를 설치하지 않았습니다.
+기존 배포판의 종료를 정리 작업으로 수행하지 않았습니다.
+
+현재 Windows 문맥에서는 Docker CLI 후보를 찾지 못했습니다.
+명시한 Docker context의 validate는 CTR-02: fail, reason: not_found, execution: not_run을 반환했습니다.
+이 결과를 컴퓨터 전체의 Docker 미설치로 일반화하지 않습니다.
+실제 엔진·Compose 정상 기동과 원격 endpoint 동작은 미검증입니다.
+
+## 앱 설치와 호출
+
+```powershell
+node scripts/package-plugin.mjs
+codex plugin marketplace add ./.local/plugin-marketplace --json
+codex plugin add windows-agent-devkit@windows-agent-devkit-local --json
+codex plugin list --marketplace windows-agent-devkit-local --json
+```
+
+앱과 공유하는 설치 목록에서 version: 0.2.1, installed: true, enabled: true를 확인했습니다.
+앱의 플러그인 화면에서 Windows Agent Devkit과 Skill 세 개를 확인했습니다.
+앱의 검증 대화에서 설치된 environment-doctor/SKILL.md를 읽었습니다.
+같은 설치 루트의 dist/cli.mjs doctor --app을 실제로 실행했습니다.
+프로젝트 소스의 src/cli.mjs를 대신 실행하지 않았습니다.
+설치본 CLI와 지원 스크립트의 해시를 빌드 산출물과 대조했습니다.
+
+| 앱의 0.2.1 실제 호출 | 관찰 결과 |
+| --- | --- |
+| 실행 권한 | 일반 샌드박스 use_default입니다. |
+| 추가 권한 요청 | 없었습니다. |
+| CLI 종료 코드 | 0입니다. |
+| pluginVersion | 0.2.1입니다. |
+| context.metadataSource | local-process-and-registry입니다. |
+| 고유 checkId | 30개입니다. |
+| 상태 집계 | pass 11, fail 0, warn 0, unknown 4, skipped 15입니다. |
+| CODEX-01 | pass입니다. |
+
+CODEX-01의 설치 목록 확인과 이번 앱의 실제 Skill 호출은 서로 다른 증거입니다.
+설치 목록 확인만으로 Skill 실행 성공을 주장하지 않습니다.
+원시 실행 기록과 화면 캡처는 Git에서 제외한 .local 경로에 보관했습니다.
+새 통합 터미널의 셸 설정 변경과 공개 게시는 이번 관찰에 포함하지 않습니다.
+
+## CIM 접근 제한의 회귀
+
+0.2.0의 앱 샌드박스에서는 CIM 접근 제한으로 보고서 생성이 실패했습니다.
+같은 0.2.0 CLI는 승인된 샌드박스 외부 실행에서 성공했습니다.
+0.2.1은 CIM이 거부되면 자기 프로세스와 읽기 전용 HKLM 운영체제 메타데이터를 사용합니다.
+대체 경로의 출처는 context.metadataSource에 표시합니다.
+샌드박스 정책이나 시스템 권한은 변경하지 않습니다.
+실제 수집기에서 CIM 호출만 실패하도록 만든 회귀 테스트도 통과했습니다.
+앱의 일반 샌드박스 호출에서 대체 경로를 사용한 성공을 확인했습니다.
+
+같은 실행 문맥에서 CIM 거부를 재현하고 보고서 생성 여부와 metadataSource를 비교하면 이 경로를 재검사할 수 있습니다.
+CIM 호출이 성공했거나 다른 실행 문맥에서만 결과가 바뀌면 이 사례의 CIM 원인 설명을 적용하지 않습니다.
+API의 읽기 조건은 [RegistryKey.OpenSubKey](https://learn.microsoft.com/en-us/dotnet/api/microsoft.win32.registrykey.opensubkey?view=net-10.0)와 [Process.MainModule](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.mainmodule?view=net-10.0)을 확인했습니다.
+
+## 0.1 검증 이력
+
+첫 CLI의 로컬 검사는 72개 중 71개 통과와 파일 심볼릭 링크 권한에 따른 생략 1개였습니다.
+당시 Windows CI에서는 72개가 모두 통과했습니다.
+PATHEXT를 제외한 자식 환경에서 명령 후보가 사라지는 사례를 재현했습니다.
+같은 PATH·작업 경로·수집기에서 PATHEXT 보존 여부만 바꿔 대조했습니다.
+두 조건의 후보 수가 같으면 해당 호스트에서는 이 원인 설명을 기각합니다.
+현재 자식 환경은 기존 PATHEXT를 보존합니다.

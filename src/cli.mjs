@@ -1,50 +1,85 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, lstat, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { diagnose, VERSION } from './doctor.mjs';
+import { createPlan, applyPlan, rollbackPlan, saveException } from './configure.mjs';
+import { createQuery } from './query.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
+const ACTIONS = ['doctor', 'plan', 'apply', 'rollback', 'exception', 'validate'];
 const STATUS_LABELS = { pass: '통과', fail: '요구 위반', warn: '검토', unknown: '미확인', skipped: '생략' };
-
 export const HELP = `Windows Agent Devkit ${VERSION}
 
-사용법: node src/cli.mjs [옵션]
+사용법: node dist/cli.mjs [doctor|plan|apply|rollback|exception|validate] [옵션]
 
-  --project <경로>          점검할 프로젝트 디렉터리, 기본값은 현재 경로
-  --format <text|json>      출력 형식, 기본값은 text
-  --languages <목록>       auto 또는 node,python,go,rust,zig,dotnet의 쉼표 목록
-  --native                 컨테이너 선언이 있어도 호스트 언어 도구 점검을 명시
-  --wsl                    WSL 호스트 메타데이터 점검 요청
-  --containers             Docker 클라이언트와 Lazydocker 점검 요청
-  --process-compose        Process Compose 메타데이터 점검 요청
+  --project <경로>          프로젝트 디렉터리, 기본값 현재 경로
+  --format <text|json>      출력 형식, 기본값 text
+  --languages <목록>       auto 또는 node,python,go,rust,zig,dotnet 쉼표 목록
+  --native                 호스트의 언어 도구 요구를 명시
+  --wsl / --containers / --process-compose   해당 도구 점검 선택
+  --app                    앱과 공유하는 플러그인 설치 목록 조회
+  --codex-executable <경로> 검증할 Codex 네이티브 실행 파일
+  --ide                    VS Code와 네이티브 빌드 도구 점검 선택
+  --storage <경로>          대상 볼륨·Dev Drive 메타데이터 조회
+  --github-auth            GitHub CLI 원격 인증 조회 선택
   --timeout-ms <정수>      조회별 제한 시간, 기본값 5000, 범위 100..30000
-  --output <파일>          요청한 파일에 저장, 기존 파일은 덮어쓰지 않음
-  --help                   이 도움말 표시
-  --version                진단 CLI 버전 표시
+  --output <파일>          출력 저장, 기존 파일은 덮어쓰지 않음
 
-프로젝트의 선언 파일을 먼저 읽고 필요한 언어만 조회합니다.
-설치·다운로드·프로필 변경·서비스 기동은 수행하지 않습니다.
-unknown은 확인되지 않았다는 뜻이며 전체 환경의 정상 동작을 보장하지 않습니다.
-종료 코드: 0=보고서 생성 및 확인한 요구 위반 없음, 1=요구 위반, 2=실행 오류
+설정 계획과 복구:
+  plan --roles <쉼표 목록> --versions <역할=고정버전,...>
+  --profile <경로>         mise 활성화를 넣을 PowerShell 프로필 명시
+  --state-dir <경로>       저장소 밖의 개인 상태 디렉터리
+  apply --plan <JSON 파일> --execute
+  rollback --journal <저널 ID> --execute
+  exception --role <역할> --reason <유지 사유> --scope <project> --execute
+
+실행 검증 대상:
+  validate --execute --distro <배포판> --linux-cwd <Linux 절대 경로>
+  --linux-tools <쉼표 목록> 배포판에서 확인할 Linux 도구의 범위
+  validate --execute --docker-context <이름> [--image <기존 이미지>]
+  --image-readiness <exit|running|healthy>  컨테이너 준비 판정 방식
+  --compose-file <경로> --services <쉼표 목록>  격리 Compose 검증
+  --service-config <경로> --services <쉼표 목록>  Process Compose 검증
+  --rust-targets <쉼표 목록>  설치된 Rust target 점검
+  --task-file <JSON 파일>   신뢰한 명령의 context·tool·args·trusted 선언
+
+  --help / -h              도움말
+  --version                CLI 버전
+
+기본 doctor는 설치·다운로드·프로필 변경·서비스 기동을 수행하지 않습니다.
+plan은 개인 상태 디렉터리에 계획을 저장합니다.
+apply·rollback·exception·실행 검증에는 --execute가 필요합니다.
+unknown은 확인되지 않았다는 뜻입니다.
+종료 코드: 0=요구 위반 없음, 1=요구 위반 또는 적용 충돌, 2=실행 오류
 `;
 
+function list(value) { return value ? [...new Set(value.split(',').map((i) => i.trim()))] : []; }
 export function parseOptions(args) {
-  const { values } = parseArgs({ args, allowPositionals: false, strict: true, options: {
-    project: { type: 'string' }, format: { type: 'string', default: 'text' },
-    languages: { type: 'string', default: 'auto' }, wsl: { type: 'boolean', default: false },
-    containers: { type: 'boolean', default: false }, 'process-compose': { type: 'boolean', default: false }, native: { type: 'boolean', default: false },
-    'timeout-ms': { type: 'string', default: '5000' }, output: { type: 'string' },
-    help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' },
-  } });
-  if (!['text', 'json'].includes(values.format)) throw new Error('--format은 text 또는 json이어야 합니다.');
-  const languages = values.languages === 'auto' ? [] : [...new Set(values.languages.split(',').map((item) => item.trim()))];
-  if (languages.some((language) => !LANGUAGES.includes(language))) throw new Error('--languages에 지원하지 않는 계열이 있습니다.');
-  if (!/^\d+$/.test(values['timeout-ms'])) throw new Error('--timeout-ms는 정수여야 합니다.');
-  const timeoutMs = Number(values['timeout-ms']);
-  if (timeoutMs < 100 || timeoutMs > 30000) throw new Error('--timeout-ms는 100..30000 범위여야 합니다.');
-  return { projectPath: resolve(values.project ?? process.cwd()), format: values.format, languages, wsl: values.wsl, containers: values.containers, processCompose: values['process-compose'], native: values.native, timeoutMs, output: values.output ? resolve(values.output) : null, help: values.help, version: values.version };
+  const tokens = [...args];
+  const action = tokens[0] && !tokens[0].startsWith('-') ? tokens.shift() : 'doctor';
+  if (!ACTIONS.includes(action)) throw new Error('지원하지 않는 명령입니다.');
+  const strings = ['project', 'languages', 'timeout-ms', 'output', 'roles', 'versions', 'profile', 'state-dir', 'plan', 'journal', 'role', 'reason', 'scope', 'distro', 'linux-cwd', 'linux-tools', 'docker-context', 'image', 'image-readiness', 'compose-file', 'service-config', 'services', 'rust-targets', 'task-file', 'storage', 'codex-executable'];
+  const booleans = ['wsl', 'containers', 'process-compose', 'native', 'execute', 'app', 'ide', 'github-auth', 'version'];
+  const schema = Object.fromEntries([...strings.map((key) => [key, { type: 'string' }]), ...booleans.map((key) => [key, { type: 'boolean', default: false }])]);
+  schema.format = { type: 'string', default: 'text' }; schema.help = { type: 'boolean', short: 'h' };
+  const { values: v } = parseArgs({ args: tokens, allowPositionals: false, strict: true, options: schema });
+  if (!['text', 'json'].includes(v.format)) throw new Error('--format은 text 또는 json이어야 합니다.');
+  const languages = !v.languages || v.languages === 'auto' ? [] : list(v.languages);
+  if (languages.some((i) => !LANGUAGES.includes(i))) throw new Error('--languages에 지원하지 않는 계열이 있습니다.');
+  const timeout = v['timeout-ms'] ?? '5000';
+  if (!/^\d+$/.test(timeout) || Number(timeout) < 100 || Number(timeout) > 30000) throw new Error('--timeout-ms는 100..30000 범위의 정수여야 합니다.');
+  const versions = {};
+  for (const item of list(v.versions)) {
+    const match = /^([a-z][a-z0-9-]*)=(\d[^=]*)$/.exec(item);
+    if (!match || Object.hasOwn(versions, match[1])) throw new Error('--versions는 역할=고정버전의 쉼표 목록이어야 합니다.');
+    versions[match[1]] = match[2];
+  }
+  if (v.execute && action === 'doctor') throw new Error('코드·서비스 실행에는 validate 명령을 사용하세요.');
+  if (v['image-readiness'] && !['exit', 'running', 'healthy'].includes(v['image-readiness'])) throw new Error('--image-readiness는 exit, running, healthy 중 하나여야 합니다.');
+  const file = (key) => v[key] === undefined ? undefined : resolve(v[key]);
+  return { action, projectPath: resolve(v.project ?? process.cwd()), format: v.format, languages, wsl: v.wsl, containers: v.containers, processCompose: v['process-compose'], native: v.native, timeoutMs: Number(timeout), output: file('output') ?? null, help: v.help, version: v.version, execute: v.execute, roles: list(v.roles), versions, profilePath: file('profile'), stateDir: file('state-dir'), planFile: file('plan'), journal: v.journal, role: v.role, reason: v.reason, scope: v.scope ?? 'project', distro: v.distro, linuxCwd: v['linux-cwd'], linuxTools: v['linux-tools'] ? list(v['linux-tools']) : undefined, dockerContext: v['docker-context'], image: v.image, imageReadiness: v['image-readiness'], composeFile: v['compose-file'], serviceConfig: v['service-config'], services: v.services ? list(v.services) : undefined, rustTargets: v['rust-targets'] ? list(v['rust-targets']) : undefined, taskFile: file('task-file'), app: v.app, ide: v.ide, storage: file('storage'), githubAuth: v['github-auth'], codexExecutable: file('codex-executable') };
 }
 
 export function formatReport(report) {
@@ -53,25 +88,41 @@ export function formatReport(report) {
     lines.push(`[${STATUS_LABELS[check.status]}] ${check.checkId}: ${check.message}`);
     if (check.resolvedPath) lines.push(`  경로: ${check.resolvedPath}`);
     if (typeof check.observed === 'string') lines.push(`  관찰: ${check.observed}`);
+    if (check.support?.status && check.support.status !== 'unknown') lines.push(`  공식 지원 계열: ${check.support.status} (${check.support.checkedOn})`);
   }
-  lines.push('', `결과: 통과 ${report.summary.pass}, 요구 위반 ${report.summary.fail}, 검토 ${report.summary.warn}, 미확인 ${report.summary.unknown}, 생략 ${report.summary.skipped}`, '공식 지원·전체 빌드·테스트·앱의 플러그인 로딩은 별도 검증이 필요합니다.');
+  lines.push('', `결과: 통과 ${report.summary.pass}, 요구 위반 ${report.summary.fail}, 검토 ${report.summary.warn}, 미확인 ${report.summary.unknown}, 생략 ${report.summary.skipped}`);
   return lines.join('\n');
 }
+async function readJson(file) {
+  if (!file) throw new Error('JSON 파일 경로가 필요합니다.');
+  const info = await lstat(file);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 2 * 1024 * 1024) throw new Error('일반 JSON 파일만 최대 2MiB까지 읽습니다.');
+  return JSON.parse(await readFile(file, 'utf8'));
+}
 
-export async function main(args, { inspect } = {}) {
+export async function main(args, { inspect, query } = {}) {
   const options = parseOptions(args);
   if (options.help) { process.stdout.write(HELP); return 0; }
   if (options.version) { process.stdout.write(`${VERSION}\n`); return 0; }
-  const report = await diagnose({ ...options, inspect });
-  const output = options.format === 'json' ? JSON.stringify(report, null, 2) : formatReport(report);
+  let payload;
+  if (options.action === 'plan') payload = await createPlan(options);
+  else if (options.action === 'apply') payload = await applyPlan({ ...options, plan: await readJson(options.planFile), query: query ?? createQuery(options) });
+  else if (options.action === 'rollback') payload = await rollbackPlan({ ...options, id: options.journal });
+  else if (options.action === 'exception') {
+    if (!options.execute) throw new Error('예외 저장에는 --execute가 필요합니다.');
+    payload = await saveException(options);
+  } else {
+    if (options.taskFile) options.task = await readJson(options.taskFile);
+    payload = await diagnose({ ...options, execute: options.action === 'validate' && options.execute, inspect, query });
+  }
+  const output = options.format === 'json' || !payload.checks ? JSON.stringify(payload, null, 2) : formatReport(payload);
   if (options.output) {
     await mkdir(dirname(options.output), { recursive: true });
     await writeFile(options.output, `${output}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   process.stdout.write(`${output}\n`);
-  return report.summary.fail ? 1 : 0;
+  return payload.summary?.fail || payload.task?.status === 'fail' || /conflict|failed|partial/.test(payload.status ?? '') ? 1 : 0;
 }
-
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try { process.exitCode = await main(process.argv.slice(2)); }
   catch (error) {

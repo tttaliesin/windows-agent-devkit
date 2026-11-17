@@ -8,7 +8,7 @@ export const INVENTORY_NAMES = Object.freeze([
   'pwsh', 'powershell', 'git', 'winget', 'mise', 'node', 'npm', 'pnpm', 'yarn',
   'python', 'py', 'uv', 'go', 'rustup', 'rustc', 'cargo', 'zig', 'dotnet', 'wsl',
   'docker', 'lazydocker', 'process-compose', 'code', 'gh', 'rg', 'nu',
-  'fnm', 'nvm', 'pyenv', 'conda', 'choco', 'scoop',
+  'fnm', 'nvm', 'pyenv', 'conda', 'choco', 'scoop', 'wt', 'codex', 'vswhere', 'fsutil',
 ]);
 
 const COLLECTOR = fileURLToPath(new URL('../scripts/collect-host.ps1', import.meta.url));
@@ -271,7 +271,7 @@ export function decodeOutput(value) {
 
 // Kill only the child created here, never a process tree, engine or existing user process.
 export function runBounded(executable, args, {
-  cwd, env, timeoutMs = 5000, maxOutputBytes = OUTPUT_LIMIT, spawnImpl = spawn,
+  cwd, env, timeoutMs = 5000, maxOutputBytes = OUTPUT_LIMIT, spawnImpl = spawn, signal,
 } = {}) {
   return new Promise((resolve) => {
     let child;
@@ -283,6 +283,7 @@ export function runBounded(executable, args, {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       if (stop) {
         try { child?.kill(); } catch { /* Only our child is eligible for termination. */ }
         child?.stdout?.destroy();
@@ -291,6 +292,8 @@ export function runBounded(executable, args, {
       }
       resolve({ state, exitCode, stdout: stop ? Buffer.alloc(0) : Buffer.concat(chunks), reason });
     };
+    const abort = () => finish('timed_out', null, '조회가 취소되었습니다.', true);
+    if (signal?.aborted) { abort(); return; }
     try {
       child = spawnImpl(executable, args, {
         cwd, env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -312,6 +315,7 @@ export function runBounded(executable, args, {
     child.on('error', () => finish('failed', null, '조회용 자식 프로세스를 실행하지 못했습니다.'));
     child.on('close', (code) => finish(code === 0 ? 'succeeded' : 'failed', code,
       code === 0 ? null : '조회 명령이 정상 종료하지 않았습니다.'));
+    signal?.addEventListener('abort', abort, { once: true });
     timer = setTimeout(() => finish('timed_out', null, '조회 제한 시간을 초과했습니다.', true), timeoutMs);
   });
 }
@@ -408,6 +412,7 @@ function inventoryFrom(output) {
     return {
       context: {
         platform: 'win32',
+        ...(safeLabel(context.metadataSource) ? { metadataSource: safeLabel(context.metadataSource) } : {}),
         os: {
           name: safeLabel(context.os.name), version: metadataVersion(context.os.version),
           build: metadataVersion(context.os.build), architecture: safeLabel(context.os.architecture),

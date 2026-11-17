@@ -33,7 +33,6 @@ test('Python의 동등 버전과 명시한 wildcard 접두사를 구분한다', 
   assert.equal(python('3.14.0', '==3.14'), 'satisfied');
   assert.equal(python('3.14.6', '==3.14.*'), 'satisfied');
   assert.equal(python('3.14.6', '!=3.14.*'), 'violated');
-  assert.equal(assess('24.18.1', '==24'), 'unknown');
 });
 
 test('최소 버전과 선호 도구 모음을 구분한다', () => {
@@ -41,9 +40,10 @@ test('최소 버전과 선호 도구 모음을 구분한다', () => {
   assert.equal(evaluateVersion('1.26.5', [{ kind: 'minimum', value: '1.25' }, { kind: 'preferred', value: '1.27.0' }]).compatibility, 'satisfied');
 });
 
-test('지원하지 않는 표현과 prerelease를 성공 처리하지 않는다', () => {
-  for (const requirement of ['workspace:*', 'latest', 'lts/*', '24 - 26', '>=3.14; sys_platform == "win32"', '00024', '9007199254740993']) assert.equal(assess('24.18.1', requirement), 'unknown');
-  assert.equal(assess('24.0.0-rc.1', '>=24'), 'unknown');
+test('잘못된 표현은 미확인으로 남기고 표준 hyphen·prerelease 규칙을 적용한다', () => {
+  for (const requirement of ['workspace:*', 'latest', 'lts/*', '>=3.14; sys_platform == "win32"', '00024', '9007199254740993']) assert.equal(assess('24.18.1', requirement), 'unknown');
+  assert.equal(assess('24.18.1', '24 - 26'), 'satisfied');
+  assert.equal(assess('24.0.0-rc.1', '>=24'), 'violated');
   assert.equal(evaluateVersion('1.90.0', [{ kind: 'channel', value: 'stable' }]).compatibility, 'unknown');
 });
 
@@ -60,4 +60,11 @@ test('caret의 0.x 경계와 wildcard 범위를 유지한다', () => {
   assert.equal(assess('24.18.1', '24.x'), 'satisfied');
   assert.equal(assess('24.18.1', '25.*'), 'violated');
   assert.equal(assess('24.18.1', '*'), 'satisfied');
+});
+
+test('같은 관리 설정의 여러 버전을 동시에 만족해야 하는 exact 핀으로 오판하지 않는다', () => {
+  const requests = ['3.14.6', '3.13.2'].map((value) => ({ source: 'mise.toml', field: 'tools.python', kind: 'exact', value }));
+  assert.equal(evaluateVersion('3.14.6', requests, { language: 'python' }).compatibility, 'unknown');
+  const constrained = [...requests, { source: 'pyproject.toml', field: 'requires-python', kind: 'range', value: '>=3.15' }];
+  assert.equal(evaluateVersion('3.14.6', constrained, { language: 'python' }).compatibility, 'violated');
 });
