@@ -1,0 +1,21 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Dependencies and generated output
+node_modules/
+.venv/
+__pycache__/
+/dist/
+/artifacts/
+/coverage/
+/.local/
+*.log
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
