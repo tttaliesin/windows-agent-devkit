@@ -1,6 +1,6 @@
 ---
 name: environment-validate
-description: 명시적으로 선택한 Windows 개발 명령·작업 실행기와 Rust target·WSL·Docker·Process Compose의 실행과 종료를 검증할 때 사용합니다.
+description: 명시적으로 선택한 Windows 개발 명령·작업 실행기와 Rust target·WSL·Docker·Process Compose의 실행과 종료를 검증하거나 사용자가 반복 실행할 WSL 작업을 등록·조회·철회할 때 사용합니다.
 ---
 
 # 개발환경의 실행 검증
@@ -90,6 +90,35 @@ PowerShell 작업은 `pwsh`를 명시한 기존 설정을 사용합니다.
 설정 구문은 최신 공식 문서와 실제 설치 버전의 차이를 확인한 뒤 선택합니다.
 just 1.52.0 예시는 `set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]`를 사용합니다.
 실행기 도입이나 기존 작업의 자동 변환을 실행 검증의 선행 조건으로 만들지 않습니다.
+
+## 승인한 WSL 작업 등록
+
+사용자가 반복 실행할 실제 작업을 선택한 경우 0.3.2의 `wsl-register`로 검토합니다.
+규칙을 둘 Windows 프로젝트와 작업을 수행할 배포판 내부 Linux 디렉터리를 각각 확인합니다.
+Linux 작업 디렉터리와 작업 JSON의 절대 `tool` 경로는 배포판의 네이티브 Linux 파일 시스템을 사용합니다.
+선택한 명령이 평가하는 Makefile·Taskfile과 그 의존 코드, 배포판의 실행기와 인터프리터를 사용자가 신뢰하는지 확인합니다.
+전용 Windows 실행 파일을 빌드할 때는 이미 설치된 Windows용 Go를 사용합니다.
+
+아래 첫 명령의 읽기 전용 출력에서 등록 범위와 `confirmation` 지문을 확인합니다.
+인수 원문과 순서는 작업 JSON에서 확인합니다.
+사용자가 검토한 범위의 등록을 승인하면 동일한 입력과 반환된 지문으로 두 번째 명령을 실행합니다.
+앱이 권한 승인을 요구하면 요청에 선택한 작업과 프로젝트에 남는 실행 규칙을 명시합니다.
+앱이 요구한 권한 승인은 사용자가 직접 합니다.
+앱의 프로젝트 신뢰 및 승인 설정은 사용자가 관리합니다.
+
+```text
+node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --format json
+node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --execute --confirm "<반환된 confirmation 지문>"
+node "<플러그인 루트>/dist/cli.mjs" wsl-tasks --project "<Windows 프로젝트 경로>"
+node "<플러그인 루트>/dist/cli.mjs" wsl-unregister --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --execute
+```
+
+등록 규칙은 그 Windows 프로젝트의 `.codex/rules/`에 둡니다.
+신뢰된 같은 Windows 프로젝트에서 새 Codex 대화를 시작해 규칙을 사용합니다.
+규칙이 적용되지 않으면 Codex를 재시작하고 새 대화에서 확인합니다.
+프로젝트 루트를 Windows 호출의 작업 디렉터리로 지정하고 목록에 나온 전용 `.exe`의 절대 경로를 인수 없이 직접 실행합니다.
+봉인된 실행 파일은 이전 대화의 캐시된 규칙으로 호출해도 작업 시작을 거부합니다.
+실제 앱의 검증 상태와 Linux 작업 예시는 `../../docs/wsl-task-registration.md`에서 확인합니다.
 
 ## 결과
 

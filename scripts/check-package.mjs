@@ -11,7 +11,7 @@ import { BUNDLE_PATH, bundleOptions } from './lib/bundle.mjs';
 
 export const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const MARKETPLACE_NAME = 'windows-agent-devkit-local';
-const RUNTIME_SCRIPTS = ['collect-advanced.ps1', 'collect-host.ps1', 'start-owned-session.ps1'];
+const RUNTIME_SCRIPTS = ['collect-advanced.ps1', 'collect-host.ps1', 'start-owned-session.ps1', 'wsl-task-launcher.go'];
 const DEPENDENCIES = { '@renovatebot/pep440': '6.0.0', semver: '7.8.6', 'smol-toml': '1.9.1', yaml: '2.9.1' };
 const DEV_DEPENDENCIES = { esbuild: '0.28.2' };
 const normalized = (value) => value.replaceAll('\\', '/');
@@ -122,7 +122,7 @@ async function verifyTextFiles(root, files, { skills = false } = {}) {
   let links = 0, skillCount = 0;
   for (const file of files) {
     const label = normalized(relative(root, file));
-    if (!/\.(?:md|mjs|ps1|json|ya?ml)$/.test(file)) continue;
+    if (!/\.(?:go|md|mjs|ps1|json|ya?ml)$/.test(file)) continue;
     const content = await readFile(file, 'utf8');
     assert.ok(content.endsWith('\n'), `마지막 줄바꿈: ${label}`);
     assert.ok(!content.includes('\r'), `LF: ${label}`);
@@ -222,6 +222,15 @@ assert.ok(code===0||code===1);`;
       const live = await runNode([cli, 'doctor', '--project', empty, '--format', 'json', '--timeout-ms', '5000', '--state-dir', state], temporary);
       assert.ok([0, 1].includes(live.code), 'Windows 번들·PowerShell 자산 실제 실행');
       assert.ok(Array.isArray(JSON.parse(live.stdout).checks), 'Windows 진단 JSON');
+      const task = join(empty, 'wsl-task.json');
+      await writeFile(task, JSON.stringify({ context: 'wsl', trusted: true, tool: '/usr/bin/bash', args: ['./scripts/check.sh'] }));
+      const review = await runNode([
+        cli, 'wsl-register', '--project', empty, '--task-name', 'check', '--distro', 'Ubuntu-24.04',
+        '--linux-cwd', '/home/example/project', '--task-file', task,
+      ], temporary);
+      assert.equal(review.code, 0, '번들의 WSL 등록 검토는 배포판이나 Go 실행 없이 작동해야 합니다.');
+      assert.match(JSON.parse(review.stdout).confirmation, /^[a-f0-9]{64}$/);
+      await assert.rejects(lstat(join(empty, '.codex')), { code: 'ENOENT' }, '등록 검토는 프로젝트 권한 파일을 만들지 않습니다.');
       native = 'passed';
     }
     for (const [name, content] of Object.entries(declarations)) assert.equal(await readFile(join(fixture, name), 'utf8'), content, `진단 원본 보존: ${name}`);
@@ -252,7 +261,7 @@ export async function verifyPackaged(directory, sourceRoot = ROOT) {
     assert.ok(!parts.some((p) => ['node_modules', 'src', 'tools', '.git', '.codegraph', 'test'].includes(p)), `설치에 불필요한 파일: ${label}`);
   }
   await runtimeScriptFiles(directory);
-  assert.ok((await readdir(join(directory, 'scripts'))).every(isRuntimeScript), '설치 패키지의 scripts에는 지정한 런타임 파일 세 개만 포함해야 합니다.');
+  assert.ok((await readdir(join(directory, 'scripts'))).every(isRuntimeScript), '설치 패키지의 scripts에는 지정한 런타임 파일만 포함해야 합니다.');
   for (const source of await runtimeScriptFiles(sourceRoot)) assert.deepEqual(await readFile(join(directory, 'scripts', basename(source))), await readFile(source), `런타임 스크립트: ${basename(source)}`);
   await verifyBundleMatchesSource(sourceRoot, directory, lock, '설치 패키지의 dist/cli.mjs가 현재 소스의 빌드와 다릅니다. npm run package를 실행하세요.');
   for (const file of await filesUnder(join(sourceRoot, 'data'), { optional: true })) assert.deepEqual(await readFile(join(directory, 'data', relative(join(sourceRoot, 'data'), file))), await readFile(file), '런타임 data 자산');

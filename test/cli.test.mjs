@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseOptions, formatReport } from '../src/cli.mjs';
@@ -17,6 +17,44 @@ test('프로젝트 경로를 코드로 보간하지 않고 옵션 데이터로 �
 
 test('지원하지 않는 언어·형식·제한 시간과 임의 위치 인수를 거부한다', () => {
   for (const args of [['--languages', 'ruby'], ['--format', 'yaml'], ['--timeout-ms', '5s'], ['--timeout-ms', '0'], ['--timeout-ms', '30001'], ['arbitrary']]) assert.throws(() => parseOptions(args));
+});
+
+test('WSL 등록 옵션은 등록 명령 범위 안에서만 사용하고 중복 지정을 거부한다', () => {
+  const options = parseOptions(['wsl-register', '--task-name', 'check', '--project', 'project',
+    '--distro', 'Ubuntu-24.04', '--linux-cwd', '/home/example/project', '--task-file', 'wsl-task.json']);
+  assert.equal(options.action, 'wsl-register');
+  assert.equal(options.name, 'check');
+  assert.equal(options.linuxCwd, '/home/example/project');
+  assert.equal(options.execute, false);
+  const invalid = [
+    ['wsl-register', '--task-name', 'one', '--task-name', 'two'],
+    ['wsl-register', '--confirm', 'example'],
+    ['wsl-register', '--state-dir', 'project'],
+    ['wsl-tasks', '--execute'],
+    ['wsl-unregister', '--task-file', 'wsl-task.json'],
+    ['validate', '--confirm', 'example'],
+  ];
+  for (const args of invalid) assert.throws(() => parseOptions(args), args.join(' '));
+});
+
+test('WSL 등록 미리보기는 실제 CLI에서 작업 정의를 확인하고 실행 파일과 규칙을 만들지 않는다', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'windows-agent-wsl-preview-'));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
+  const taskPath = join(root, 'task.json');
+  const args = ['--noprofile', '--norc', './scripts/check-registration-only-arg.sh'];
+  await writeFile(taskPath, JSON.stringify({ context: 'wsl', trusted: true, tool: '/usr/bin/bash', args }));
+  const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+  const run = promisify(execFile);
+  const selection = [cli, 'wsl-register', '--project', root, '--task-name', 'check', '--distro', 'Ubuntu-24.04',
+    '--linux-cwd', '/home/example/project', '--task-file', taskPath];
+  const preview = await run(process.execPath, selection);
+  assert.match(JSON.parse(preview.stdout).confirmation, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(preview.stdout, /check-registration-only-arg/);
+  await assert.rejects(run(process.execPath, [...selection, '--execute', '--confirm', '0'.repeat(64)]),
+    (error) => error.code === 2);
+  await assert.rejects(run(process.execPath, [cli, 'wsl-unregister', '--project', root, '--task-name', 'check']),
+    (error) => error.code === 2);
+  await assert.rejects(lstat(join(root, '.codex')), { code: 'ENOENT' });
 });
 
 test('도움말은 호스트 조회 없이 실행하고 잘못된 옵션은 종료 코드 2를 반환한다', async () => {

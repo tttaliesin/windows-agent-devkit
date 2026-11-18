@@ -52,7 +52,7 @@ codex plugin list --marketplace windows-agent-devkit-local --json
 | --- | --- |
 | `environment-doctor` | 프로젝트 선언·호스트 경로·30개 점검 항목과 권장 구성 비교 |
 | `environment-setup` | 고정 버전의 변경 계획·적용·복구·유지 예외 기록 |
-| `environment-validate` | 선택한 프로젝트 명령과 WSL·Docker·Process Compose의 실행 검증 |
+| `environment-validate` | 선택한 프로젝트 명령과 WSL·Docker·Process Compose의 실행 검증 및 승인한 WSL 작업 등록 |
 
 ## 변경 계획과 실행
 
@@ -122,6 +122,15 @@ Windows 프로젝트의 기존 명령은 신뢰한 task JSON으로 전달합니�
 기존 Task·just·Make·npm scripts에는 권장 차이와 전환안 또는 유지 사유를 제시합니다.
 기존 명령의 자동 변환과 실행기의 필수 설치는 수행하지 않습니다.
 역할·선택·Windows 셸·CI 연계의 예시는 [작업 실행기 가이드](docs/task-runners.md)에 기록합니다.
+
+## 승인한 WSL 작업 등록
+
+0.3.2에서는 사용자가 반복 실행하도록 선택한 기존 WSL 작업을 Windows 프로젝트에 등록하는 절차를 제공합니다.
+`wsl-register`가 보여 주는 범위와 작업 JSON을 검토한 뒤 반환된 지문으로 등록합니다.
+등록은 전용 Windows 실행 파일과 해당 프로젝트의 `.codex/rules/` 규칙을 만듭니다.
+신뢰된 프로젝트의 새 Codex 대화에서 전용 실행 파일의 절대 경로를 인수 없이 호출합니다.
+`wsl-tasks`로 등록을 확인하고 `wsl-unregister --execute`로 철회합니다.
+등록 전제조건과 Linux Makefile·Taskfile 예시는 [승인한 WSL 작업 등록 가이드](docs/wsl-task-registration.md)에서 확인합니다.
 
 ## 개발과 확인
 
