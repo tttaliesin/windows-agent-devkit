@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -193,6 +196,43 @@ test('동시에 같은 이름의 등록과 해제를 거부하면서 다른 이�
     await work;
   }
   assert.deepEqual((await list(ctx)).tasks.map(({ state }) => state), ['active', 'active']);
+});
+
+test('종료된 프로세스의 잠금을 회수해 활성 WSL 등록을 철회하고 새 경로로 다시 등록한다', async (t) => {
+  const ctx = await fixture(t);
+  const first = await register(ctx);
+  const [original] = ctx.invocations;
+  const lockDirectory = path.join(path.dirname(original.directory), 'mutation.lock');
+  const otherRule = path.join(path.dirname(first.rulePath), 'existing.rules');
+  const otherRuleText = '# existing rule\n';
+  await writeFile(otherRule, otherRuleText, { flag: 'wx' });
+
+  const owner = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore', windowsHide: true });
+  assert.deepEqual(await once(owner, 'close'), [0, null]);
+  assert.ok(Number.isInteger(owner.pid) && owner.pid > 0);
+  assert.throws(() => process.kill(owner.pid, 0), { code: 'ESRCH' });
+  await mkdir(lockDirectory);
+  await writeFile(path.join(lockDirectory, `owner-${owner.pid}-${randomUUID()}`),
+    'windows-agent-devkit-wsl-mutation-lock\n', { flag: 'wx' });
+
+  assert.equal(await permitsLaunch(original), true);
+  assert.equal(await readFile(first.rulePath, 'utf8'), ruleText(first.executable));
+  assert.deepEqual((await list(ctx)).tasks.map(({ id, state }) => [id, state]), [[first.id, 'active']]);
+  assert.deepEqual(await revoke(ctx), {
+    state: 'revoked', projectPath: ctx.projectPath, name: ctx.options.name, id: first.id, lease: 'removed', rule: 'removed',
+  });
+  await missing(lockDirectory);
+  await missing(original.leasePath);
+  await missing(first.rulePath);
+  assert.equal(await readFile(otherRule, 'utf8'), otherRuleText);
+  assert.deepEqual((await list(ctx)).tasks, []);
+
+  const replacement = await register(ctx);
+  assert.notEqual(replacement.id, first.id);
+  assert.notEqual(replacement.executable, first.executable);
+  assert.notEqual(replacement.rulePath, first.rulePath);
+  assert.equal(await permitsLaunch(original), false);
+  assert.equal(await permitsLaunch(ctx.invocations[1]), true);
 });
 
 test('백엔드 오류는 알려진 코드만 보존하고 실패한 세대는 활성화하지 않는다', async (t) => {

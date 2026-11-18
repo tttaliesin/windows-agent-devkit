@@ -7,14 +7,14 @@ import { argv, linuxPath, linuxTool, safe } from './validation/inputs.mjs';
 import { provisionWslLauncher } from './wsl-launcher.mjs';
 import {
   absolutePath, appendExclude, assertDirectory, checkedExecutable, childDirectory, failure,
-  plainDirectory, publishRule, readChecked, removeEmptyDirectory, removeMatching, removeMatchingRule, writeExclusive,
+  plainDirectory, publishRule, readChecked, removeMatching, removeMatchingRule, writeExclusive,
 } from './wsl-registrations/files.mjs';
+import { withNameLock } from './wsl-registrations/lock.mjs';
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const NAME_PREFIX = 'task-';
-const LOCK = 'mutation.lock';
 const LEASE = 'active.lease';
 const RETIRED = 'retired';
 const TASK = 'task.json';
@@ -137,17 +137,6 @@ async function listRegistry(project, localAppData, platform, userProfile) {
   });
   if (!root && primaryError) throw primaryError;
   return root;
-}
-
-async function withNameLock(directory, fn) {
-  let lock;
-  try { lock = await childDirectory(directory, LOCK, { create: true, exclusive: true }); }
-  catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    throw failure('WSL_REGISTRATION_BUSY', '이 이름의 WSL 작업 등록 또는 해제가 진행 중입니다.');
-  }
-  try { return await fn(); }
-  finally { await removeEmptyDirectory(lock); }
 }
 
 function generation(project, key, id, directory) {
