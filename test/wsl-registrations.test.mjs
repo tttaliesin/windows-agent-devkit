@@ -6,10 +6,14 @@ import { link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { listWslTasks, previewWslRegistration, registerWslTask, unregisterWslTask } from '../src/wsl-registrations.mjs';
+import {
+  enableWslRunner, listWslTasks, previewWslRegistration, previewWslRunner, registerWslTask, unregisterWslTask,
+} from '../src/wsl-registrations.mjs';
 
 const PREFIX = 'windows-agent-wsl-registration-';
 const TASK = { context: 'wsl', trusted: true, tool: '/usr/bin/make', args: ['check', 'private argument && quoted "value"'] };
+const RUNNER_RULE = 'windows-agent-devkit-wsl-runner.rules';
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const missing = (filename) => assert.rejects(lstat(filename), { code: 'ENOENT' });
 const taskAt = (definition, file) => writeFile(file, JSON.stringify(definition));
 const ruleText = (executable) => 'prefix_rule(pattern = [' + JSON.stringify(executable) + '], decision = "allow")\n';
@@ -35,7 +39,7 @@ async function fixture(t) {
   await taskAt(TASK, taskFile);
   const options = { projectPath, name: 'check', distro: 'Ubuntu-24.04', linuxCwd: '/home/me/project', taskFile, version: '0.3.2' };
   const invocations = [];
-  const provision = async (input) => {
+  const provision = async (input, executableName = 'wsl task.exe') => {
     invocations.push(input);
     assert.equal(input.projectPath, await realpath(input.projectPath));
     assert.equal(path.dirname(input.taskPath), input.directory);
@@ -46,7 +50,7 @@ async function fixture(t) {
     assert.deepEqual(await readdir(input.fixturePath), []);
     assert.deepEqual(await readdir(input.statePath), []);
     await missing(input.leasePath);
-    const executable = path.join(input.directory, 'wsl task.exe');
+    const executable = path.join(input.directory, executableName);
     await writeFile(executable, 'fixture executable', { flag: 'wx' });
     return { executable };
   };
@@ -57,6 +61,30 @@ async function register(ctx, overrides = {}, dependencies = ctx.dependencies) {
   const options = { ...ctx.options, ...overrides };
   const { confirmation } = await previewWslRegistration(options);
   return registerWslTask({ ...options, execute: true, confirm: confirmation }, dependencies);
+}
+
+function registerShared(ctx, overrides = {}) {
+  return register(ctx, { version: '0.3.3', ...overrides }, {
+    ...ctx.dependencies,
+    provision: (input) => ctx.dependencies.provision(input, 'wsl-task.exe'),
+  });
+}
+
+function runnerFixture(ctx) {
+  const { localAppData, platform } = ctx.dependencies;
+  const invocations = [];
+  const provision = async ({ directory, registryPath, projectPath }) => {
+    invocations.push({ directory, registryPath, projectPath });
+    const executable = path.join(directory, 'wsl-run.exe');
+    await writeFile(executable, 'fixture project runner', { flag: 'wx' });
+    return { executable };
+  };
+  return { invocations, dependencies: { localAppData, platform, provision } };
+}
+
+async function enableRunner(projectPath, dependencies) {
+  const { confirmation } = await previewWslRunner({ projectPath }, dependencies);
+  return enableWslRunner({ projectPath, execute: true, confirm: confirmation }, dependencies);
 }
 
 const revoke = (ctx, name = ctx.options.name) => unregisterWslTask({ ...ctx.options, name, execute: true }, ctx.dependencies);
@@ -352,4 +380,178 @@ test('목록은 명시한 사용자 프로필의 로컬 저장소만 보조 조�
   await missing(path.join(sandboxLocal, 'WindowsAgentDevkit'));
   await assert.rejects(register(ctx, { name: 'other' }, { ...ctx.dependencies, platform: 'linux' }), { code: 'WSL_WINDOWS_REQUIRED' });
   await assert.rejects(register(ctx, { name: 'other' }, { ...ctx.dependencies, localAppData: ctx.projectPath }), { code: 'WSL_STATE_INSIDE_PROJECT' });
+});
+
+test('WSL 공통 실행기 검토와 확인이 맞지 않는 활성화는 파일을 쓰지 않는다', async (t) => {
+  const ctx = await fixture(t);
+  const { dependencies, invocations } = runnerFixture(ctx);
+  const options = { projectPath: ctx.projectPath };
+  const preview = await previewWslRunner(options, dependencies);
+  assert.equal(preview.state, 'review_required');
+  assert.equal(preview.projectPath, ctx.projectPath);
+  assert.match(preview.confirmation, /^[a-f0-9]{64}$/);
+  assert.deepEqual(await readdir(ctx.projectPath), [path.basename(ctx.taskFile)]);
+  assert.deepEqual(await readdir(ctx.localAppData), []);
+
+  await assert.rejects(enableWslRunner({ ...options, confirm: preview.confirmation }, dependencies), { code: 'WSL_CONFIRMATION_REQUIRED' });
+  await assert.rejects(enableWslRunner({ ...options, execute: true }, dependencies), { code: 'WSL_CONFIRMATION_REQUIRED' });
+  await assert.rejects(enableWslRunner({ ...options, execute: true, confirm: '0'.repeat(64) }, dependencies), { code: 'WSL_CONFIRMATION_MISMATCH' });
+  assert.deepEqual(invocations, []);
+  assert.deepEqual(await readdir(ctx.projectPath), [path.basename(ctx.taskFile)]);
+  assert.deepEqual(await readdir(ctx.localAppData), []);
+});
+
+test('WSL 공통 실행기를 다시 활성화하면 같은 고정 실행 파일과 규칙을 재사용한다', async (t) => {
+  const ctx = await fixture(t);
+  const { dependencies, invocations } = runnerFixture(ctx);
+  const preview = await previewWslRunner({ projectPath: ctx.projectPath }, dependencies);
+  const request = { projectPath: ctx.projectPath, execute: true, confirm: preview.confirmation };
+  const enabled = await enableWslRunner(request, dependencies);
+  assert.equal(enabled.state, 'enabled');
+  assert.equal(invocations.length, 1);
+  const [{ directory, registryPath, projectPath }] = invocations;
+  assert.equal(projectPath, ctx.projectPath);
+  assert.equal(path.dirname(directory), registryPath);
+  assert.equal(path.dirname(registryPath), path.join(ctx.localAppData, 'WindowsAgentDevkit', 'approved-wsl'));
+  assert.equal(enabled.executable, path.join(registryPath, 'project-runner-v1', 'wsl-run.exe'));
+  assert.equal(enabled.rulePath, path.join(ctx.projectPath, '.codex', 'rules', RUNNER_RULE));
+  assert.equal(preview.executable, enabled.executable);
+  assert.equal(preview.rulePath, enabled.rulePath);
+  const executableBytes = await readFile(enabled.executable, 'utf8');
+  const rule = await readFile(enabled.rulePath, 'utf8');
+  assert.equal(executableBytes, 'fixture project runner');
+  assert.equal(rule, ruleText(enabled.executable));
+
+  assert.deepEqual(await enableWslRunner(request, dependencies), enabled);
+  assert.equal(invocations.length, 1);
+  assert.equal(await readFile(enabled.executable, 'utf8'), executableBytes);
+  assert.equal(await readFile(enabled.rulePath, 'utf8'), rule);
+  assert.deepEqual(await readdir(path.dirname(enabled.rulePath)), [RUNNER_RULE]);
+});
+
+test('WSL 공통 등록은 UUID로 실행기를 공유하고 기존 전용 등록과 함께 조회된다', async (t) => {
+  const ctx = await fixture(t);
+  const legacy = await register(ctx, { name: 'legacy' });
+  const [legacyTask] = (await list(ctx)).tasks;
+  assert.equal(legacyTask.state, 'active');
+  assert.equal(legacyTask.args, undefined);
+  const { dependencies } = runnerFixture(ctx);
+  const runner = await enableRunner(ctx.projectPath, dependencies);
+  const first = await registerShared(ctx);
+  const second = await registerShared(ctx, { name: 'lint' });
+  assert.notEqual(first.id, second.id);
+
+  const { tasks } = await list(ctx);
+  assert.equal(tasks.length, 3);
+  for (const registration of [first, second]) {
+    const { id, name } = registration;
+    const launch = { id, name, executable: runner.executable, rulePath: runner.rulePath };
+    const listed = tasks.find((task) => task.id === id);
+    assert.match(id, UUID_V4);
+    assert.partialDeepStrictEqual(registration, { state: 'registered', ...launch });
+    assert.deepEqual(registration.args, [id]);
+    assert.partialDeepStrictEqual(listed, { state: 'active', ...launch });
+    assert.deepEqual(listed.args, [id]);
+  }
+  assert.deepEqual(tasks.find(({ id }) => id === legacy.id), legacyTask);
+  assert.deepEqual((await readdir(path.dirname(runner.rulePath))).sort(), [RUNNER_RULE, path.basename(legacy.rulePath)].sort());
+});
+
+test('WSL 공통 등록 철회는 해당 lease만 제거하고 같은 이름에 새 UUID를 발급한다', async (t) => {
+  const ctx = await fixture(t);
+  const legacy = await register(ctx, { name: 'legacy' });
+  const { dependencies } = runnerFixture(ctx);
+  const runner = await enableRunner(ctx.projectPath, dependencies);
+  const first = await registerShared(ctx);
+  const second = await registerShared(ctx, { name: 'lint' });
+  const [legacyGeneration, firstGeneration, secondGeneration] = ctx.invocations;
+  const sharedRule = await readFile(runner.rulePath);
+  const legacyRule = await readFile(legacy.rulePath);
+  assert.equal(await permitsLaunch(firstGeneration), true);
+
+  assert.deepEqual(await revoke(ctx), {
+    state: 'revoked', projectPath: ctx.projectPath, name: ctx.options.name, id: first.id, lease: 'removed', rule: 'retained',
+  });
+  await missing(firstGeneration.leasePath);
+  assert.equal(await permitsLaunch(legacyGeneration), true);
+  assert.equal(await permitsLaunch(secondGeneration), true);
+  assert.deepEqual(await readFile(runner.rulePath), sharedRule);
+  assert.deepEqual(await readFile(legacy.rulePath), legacyRule);
+  assert.deepEqual((await list(ctx)).tasks.map(({ id, state }) => [id, state]), [[legacy.id, 'active'], [second.id, 'active']]);
+
+  const replacement = await registerShared(ctx);
+  assert.match(replacement.id, UUID_V4);
+  assert.notEqual(replacement.id, first.id);
+  assert.partialDeepStrictEqual(replacement, {
+    state: 'registered', executable: runner.executable, rulePath: runner.rulePath,
+  });
+  assert.deepEqual(replacement.args, [replacement.id]);
+  await missing(firstGeneration.leasePath);
+  assert.equal(await permitsLaunch(ctx.invocations[3]), true);
+});
+
+test('WSL 공통 등록 목록은 변조된 디스패치 기록의 UUID만 충돌로 표시한다', async (t) => {
+  const ctx = await fixture(t);
+  const { dependencies } = runnerFixture(ctx);
+  const runner = await enableRunner(ctx.projectPath, dependencies);
+  const first = await registerShared(ctx);
+  const second = await registerShared(ctx, { name: 'lint' });
+  const descriptorPath = path.join(path.dirname(runner.executable), `${first.id}.json`);
+  const descriptor = JSON.parse(await readFile(descriptorPath, 'utf8'));
+  const hash = (descriptor.hash[0] === '0' ? '1' : '0') + descriptor.hash.slice(1);
+  await writeFile(descriptorPath, `${JSON.stringify({ ...descriptor, hash })}\n`);
+
+  const { tasks } = await list(ctx);
+  assert.equal(tasks.length, 2);
+  assert.deepEqual(tasks.find(({ id }) => id === first.id), { state: 'conflict', name: first.name, id: first.id });
+  const unaffected = tasks.find(({ id }) => id === second.id);
+  assert.equal(unaffected?.state, 'active');
+  assert.deepEqual(unaffected.args, [second.id]);
+});
+
+test('WSL 공통 규칙 충돌은 활성화와 새 등록을 거부하고 편집된 규칙을 보존한다', async (t) => {
+  const ctx = await fixture(t);
+  const { dependencies, invocations } = runnerFixture(ctx);
+  const runner = await enableRunner(ctx.projectPath, dependencies);
+  const registered = await registerShared(ctx);
+  const editedRule = ruleText(runner.executable) + '# locally edited\n';
+  await writeFile(runner.rulePath, editedRule);
+
+  await assert.rejects(enableRunner(ctx.projectPath, dependencies), { code: 'WSL_RUNNER_CONFLICT' });
+  await assert.rejects(registerShared(ctx, { name: 'lint' }), { code: 'WSL_RUNNER_CONFLICT' });
+  assert.equal(invocations.length, 1);
+  assert.equal(ctx.invocations.length, 1);
+  assert.equal(await readFile(runner.rulePath, 'utf8'), editedRule);
+  assert.deepEqual(await readdir(path.dirname(runner.rulePath)), [RUNNER_RULE]);
+  assert.deepEqual((await list(ctx)).tasks, [{ state: 'conflict', name: registered.name, id: registered.id }]);
+});
+
+test('WSL 공통 실행기와 같은 이름의 등록은 프로젝트 범위에서 분리된다', async (t) => {
+  const ctx = await fixture(t);
+  const { dependencies } = runnerFixture(ctx);
+  const otherProject = path.join(ctx.base, 'Other project');
+  await mkdir(otherProject);
+  const runner = await enableRunner(ctx.projectPath, dependencies);
+  await assert.rejects(enableWslRunner({
+    projectPath: otherProject, execute: true, confirm: runner.confirmation,
+  }, dependencies), { code: 'WSL_CONFIRMATION_MISMATCH' });
+  await missing(path.join(otherProject, '.codex'));
+
+  const otherRunner = await enableRunner(otherProject, dependencies);
+  assert.notEqual(runner.executable, otherRunner.executable);
+  assert.equal(otherRunner.rulePath, path.join(otherProject, '.codex', 'rules', RUNNER_RULE));
+  const first = await registerShared(ctx);
+  const other = await registerShared(ctx, { projectPath: otherProject });
+  assert.equal(first.executable, runner.executable);
+  assert.equal(other.executable, otherRunner.executable);
+  const otherList = () => listWslTasks({ projectPath: otherProject }, ctx.dependencies);
+  assert.deepEqual((await list(ctx)).tasks.map(({ id }) => id), [first.id]);
+  const beforeRevoke = await otherList();
+  assert.deepEqual(beforeRevoke.tasks.map(({ id, state, args }) => [id, state, args]), [[other.id, 'active', [other.id]]]);
+
+  assert.equal((await revoke(ctx)).state, 'revoked');
+  assert.deepEqual((await list(ctx)).tasks, []);
+  assert.deepEqual(await otherList(), beforeRevoke);
+  assert.equal(await permitsLaunch(ctx.invocations[1]), true);
+  assert.equal(await readFile(otherRunner.rulePath, 'utf8'), ruleText(otherRunner.executable));
 });

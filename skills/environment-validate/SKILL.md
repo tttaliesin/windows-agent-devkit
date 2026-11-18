@@ -93,32 +93,59 @@ just 1.52.0 예시는 `set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-
 
 ## 승인한 WSL 작업 등록
 
-사용자가 반복 실행할 실제 작업을 선택한 경우 0.3.2의 `wsl-register`로 검토합니다.
+사용자가 반복 실행할 실제 작업을 선택한 경우 `wsl-register`로 검토합니다.
 규칙을 둘 Windows 프로젝트와 작업을 수행할 배포판 내부 Linux 디렉터리를 각각 확인합니다.
 Linux 작업 디렉터리와 작업 JSON의 절대 `tool` 경로는 배포판의 네이티브 Linux 파일 시스템을 사용합니다.
 선택한 명령이 평가하는 Makefile·Taskfile과 그 의존 코드, 배포판의 실행기와 인터프리터를 사용자가 신뢰하는지 확인합니다.
-전용 Windows 실행 파일을 빌드할 때는 이미 설치된 Windows용 Go를 사용합니다.
+Windows 실행 파일을 빌드할 때는 이미 설치된 Windows용 Go를 사용합니다.
+
+### 0.3.3 공통 실행기 활성화
+
+공통 실행기는 0.3.3부터 사용할 수 있습니다.
+사용자가 공통 실행기 사용을 요청한 Windows 프로젝트마다 한 번 활성화합니다.
+첫 명령은 읽기 전용 검토이며 `--project`에 Windows 프로젝트의 절대 경로를 전달합니다.
+검토 결과에서 사용자가 요청한 프로젝트를 확인한 뒤 같은 명령에 실행 옵션과 반환된 `confirmation` 값을 붙입니다.
+
+```text
+node "<플러그인 루트>/dist/cli.mjs" wsl-enable --project "<Windows 프로젝트 절대 경로>"
+node "<플러그인 루트>/dist/cli.mjs" wsl-enable --project "<Windows 프로젝트 절대 경로>" --execute --confirm "<반환된 confirmation 값>"
+```
+
+활성화는 보호된 고정 실행기 `project-runner-v1/wsl-run.exe`를 설치합니다.
+선택한 프로젝트의 `.codex/rules/windows-agent-devkit-wsl-runner.rules`는 해당 실행 파일의 절대 경로만 허용합니다.
+규칙과 설정에서 쓰기 대상은 이 프로젝트의 규칙 파일 한 개로 한정합니다.
+활성화 전에 규칙을 읽은 Codex 대화에서는 프로젝트 규칙을 한 번 다시 로드합니다.
+공통 규칙을 읽은 뒤에는 같은 대화에서 새로 등록한 작업을 규칙 재로딩 없이 실행할 수 있습니다.
+
+### 개별 작업 검토와 실행
 
 아래 첫 명령의 읽기 전용 출력에서 등록 범위와 `confirmation` 지문을 확인합니다.
 인수 원문과 순서는 작업 JSON에서 확인합니다.
 사용자가 검토한 범위의 등록을 승인하면 동일한 입력과 반환된 지문으로 두 번째 명령을 실행합니다.
-앱이 권한 승인을 요구하면 요청에 선택한 작업과 프로젝트에 남는 실행 규칙을 명시합니다.
+앱이 권한 승인을 요구하면 요청에 대상 프로젝트와 승인할 작업을 명시합니다.
 앱이 요구한 권한 승인은 사용자가 직접 합니다.
 앱의 프로젝트 신뢰 및 승인 설정은 사용자가 관리합니다.
 
 ```text
-node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --format json
-node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --execute --confirm "<반환된 confirmation 지문>"
-node "<플러그인 루트>/dist/cli.mjs" wsl-tasks --project "<Windows 프로젝트 경로>"
-node "<플러그인 루트>/dist/cli.mjs" wsl-unregister --project "<Windows 프로젝트 경로>" --task-name "<등록 ID>" --execute
+node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 절대 경로>" --task-name "<등록 이름>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --format json
+node "<플러그인 루트>/dist/cli.mjs" wsl-register --project "<Windows 프로젝트 절대 경로>" --task-name "<등록 이름>" --distro "<배포판>" --linux-cwd "<Linux 절대 작업 경로>" --task-file "<선택한 작업 JSON>" --execute --confirm "<반환된 confirmation 지문>"
+node "<플러그인 루트>/dist/cli.mjs" wsl-tasks --project "<Windows 프로젝트 절대 경로>" --format json
+node "<플러그인 루트>/dist/cli.mjs" wsl-unregister --project "<Windows 프로젝트 절대 경로>" --task-name "<등록 이름>" --execute
 ```
 
-등록 규칙은 그 Windows 프로젝트의 `.codex/rules/`에 둡니다.
-신뢰된 같은 Windows 프로젝트에서 새 Codex 대화를 시작해 규칙을 사용합니다.
-규칙이 적용되지 않으면 Codex를 재시작하고 새 대화에서 확인합니다.
-프로젝트 루트를 Windows 호출의 작업 디렉터리로 지정하고 목록에 나온 전용 `.exe`의 절대 경로를 인수 없이 직접 실행합니다.
-봉인된 실행 파일은 이전 대화의 캐시된 규칙으로 호출해도 작업 시작을 거부합니다.
-실제 앱의 검증 상태와 Linux 작업 예시는 `../../docs/wsl-task-registration.md`에서 확인합니다.
+공통 실행기를 사용하는 새 작업은 등록 결과와 `wsl-tasks`에서 `executable`과 `args`를 반환합니다.
+Windows 호출의 작업 디렉터리를 등록한 프로젝트 경로로 지정합니다.
+`executable`의 절대 경로를 직접 실행하고 `args`의 UUID 하나를 전달합니다.
+PowerShell 명령에는 UUID를 작은따옴표로 감싼 문자열 리터럴로 넣습니다.
+`wsl-unregister --task-name <이름> --execute`는 해당 등록 세대의 실행 허가 파일(lease)을 즉시 제거합니다.
+공통 규칙은 다른 등록 작업에 계속 적용됩니다.
+같은 대화에서 철회한 UUID로 호출해도 실행기가 작업 시작을 거부합니다.
+이미 시작한 작업은 계속 실행됩니다.
+
+기존 등록과 공통 실행기를 활성화하지 않은 프로젝트에는 0.3.2의 작업별 규칙을 그대로 적용합니다.
+해당 작업별 규칙을 읽은 신뢰된 Windows 프로젝트에서 전용 `.exe`를 인수 없이 직접 호출합니다.
+철회로 봉인된 실행 파일은 캐시된 규칙으로 호출해도 작업 시작을 거부합니다.
+Linux 작업 예시와 버전별 검증 상태는 `../../docs/wsl-task-registration.md`에서 확인합니다.
 
 ## 결과
 

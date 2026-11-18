@@ -4,12 +4,16 @@ import path from 'node:path';
 import { existingEntry, inside, MAX_BYTES } from './project/files.mjs';
 import { parseJsonObject } from './project/json.mjs';
 import { argv, linuxPath, linuxTool, safe } from './validation/inputs.mjs';
-import { provisionWslLauncher } from './wsl-launcher.mjs';
+import { provisionWslLauncher, provisionWslProjectRunner } from './wsl-launcher.mjs';
 import {
   absolutePath, appendExclude, assertDirectory, checkedExecutable, childDirectory, failure,
   plainDirectory, publishRule, readChecked, removeMatching, removeMatchingRule, writeExclusive,
 } from './wsl-registrations/files.mjs';
 import { withNameLock } from './wsl-registrations/lock.mjs';
+import {
+  RUNNER_RULE, dispatchEntry, dispatchFile, installProjectRunner, jsonBytes, readProjectRunner,
+  ruleBytes, runnerExecutable, validDispatchEntry,
+} from './wsl-registrations/runner.mjs';
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -28,12 +32,11 @@ const PROVISION_ERRORS = {
   WSL_LAUNCHER_LINUX_UNVERIFIED: '지정한 WSL 배포판이 실행되는지 확인하고 Linux 네이티브 파일 시스템의 실제 작업 디렉터리와 실행 파일을 지정하세요.',
   WSL_LAUNCHER_BUILD_FAILED: '설치된 Windows용 Go로 WSL 전용 실행 파일을 빌드할 수 없습니다. 로컬 Go 설치와 LOCALAPPDATA 쓰기 권한을 확인하세요.',
   WSL_LAUNCHER_INSTALLATION_INVALID: '설치본의 dist/cli.mjs, PowerShell 수집기, Windows 실행 파일을 확인하세요.',
+  WSL_RUNNER_LOCAL_APP_DATA: '샌드박스 밖의 Windows 사용자 로컬 앱 데이터에 고정 실행기를 설치해야 합니다.',
 };
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-const jsonBytes = (value) => Buffer.from(`${JSON.stringify(value)}\n`);
 const ruleName = (name, id) => `windows-agent-devkit-wsl-${name}-${id}.rules`;
-const ruleBytes = (executable) => Buffer.from(`prefix_rule(pattern = [${JSON.stringify(executable)}], decision = "allow")\n`);
 const normalizedLinuxPath = (value) => linuxPath(value) && value.isWellFormed() && path.posix.normalize(value) === value;
 
 function nameKey(name) {
@@ -100,7 +103,7 @@ async function gitRoot(project) {
   }
 }
 
-async function registry(project, localAppData, platform, create = false) {
+async function registryLocation(project, localAppData, platform) {
   if (platform !== 'win32') throw failure('WSL_WINDOWS_REQUIRED', 'Windows 호스트의 Node.js에서 WSL 등록 명령을 실행하세요.');
   const local = absolutePath(localAppData);
   const anchor = local && await plainDirectory(local);
@@ -110,9 +113,51 @@ async function registry(project, localAppData, platform, create = false) {
   if (inside(repo ?? project.filename, store) || inside(store, project.filename)) {
     throw failure('WSL_STATE_INSIDE_PROJECT', 'WSL 등록 상태는 프로젝트와 Git 작업 트리 밖의 LOCALAPPDATA에 있어야 합니다.');
   }
+  return { anchor, filename: path.join(store, project.key) };
+}
+
+async function registry(project, localAppData, platform, create = false) {
+  const { anchor } = await registryLocation(project, localAppData, platform);
   const product = await childDirectory(anchor, 'WindowsAgentDevkit', { create });
   const root = product && await childDirectory(product, 'approved-wsl', { create });
   return root && await childDirectory(root, project.key, { create });
+}
+
+async function runnerPlan(options, localAppData, platform) {
+  const project = await canonicalProject(options.projectPath);
+  const { filename } = await registryLocation(project, localAppData, platform);
+  const executable = runnerExecutable(filename);
+  const rulePath = path.join(project.filename, '.codex', 'rules', RUNNER_RULE);
+  const confirmation = sha256(JSON.stringify(['windows-agent-devkit-wsl-runner-v1', project.filename, executable, rulePath]));
+  return { project, summary: { projectPath: project.filename, executable, rulePath, confirmation } };
+}
+
+function runnerLocalAppData() {
+  const local = process.env.LOCALAPPDATA;
+  const profile = absolutePath(process.env.USERPROFILE);
+  return profile && /(?:^|[\\/])#!sandbox\./i.test(local ?? '') ? path.join(profile, 'AppData', 'Local') : local;
+}
+
+export async function previewWslRunner(options, { localAppData = runnerLocalAppData(), platform = process.platform } = {}) {
+  const { summary } = await runnerPlan(options, localAppData, platform);
+  return { state: 'review_required', ...summary };
+}
+
+export async function enableWslRunner(options, {
+  localAppData = runnerLocalAppData(), platform = process.platform, provision = provisionWslProjectRunner,
+} = {}) {
+  if (options.execute !== true || !safe(options.confirm, HASH)) {
+    throw failure('WSL_CONFIRMATION_REQUIRED', '고정 실행기 미리보기를 검토한 뒤 --execute와 --confirm을 함께 지정하세요.');
+  }
+  const { project, summary } = await runnerPlan(options, localAppData, platform);
+  if (options.confirm !== summary.confirmation) {
+    throw failure('WSL_CONFIRMATION_MISMATCH', 'WSL 고정 실행기 입력이 검토한 값과 다릅니다.');
+  }
+  await ruleDirectory(project);
+  const root = await registry(project, localAppData, platform, true);
+  const rules = await ruleDirectory(project, true);
+  await installProjectRunner(root, project, rules, (input) => provisionLauncher(provision, input));
+  return { state: 'enabled', ...summary, gitExcluded: await excludeRule(project, RUNNER_RULE) };
 }
 
 async function listRegistry(project, localAppData, platform, userProfile) {
@@ -175,7 +220,9 @@ async function excludeRule(project, filename) {
     const infoDir = await childDirectory(gitDir, 'info', { create: true });
     const relative = path.relative(repo, path.join(project.filename, '.codex', 'rules', filename));
     const literal = relative.split(path.sep).map((part) => part.replace(/[\\*?\[\]]/g, '\\$&')).join('/');
-    await appendExclude(infoDir, `/${literal}\n`);
+    const line = `/${literal}`;
+    const previous = await readChecked(infoDir, 'exclude', MAX_BYTES);
+    if (!previous?.bytes.toString('utf8').split(/\r?\n/).includes(line)) await appendExclude(infoDir, `${line}\n`);
     return true;
   } catch { return false; }
 }
@@ -185,20 +232,9 @@ async function verifyFile(directory, name, expected) {
   if (!current?.bytes.equals(expected)) throw failure('WSL_REGISTRATION_CONFLICT', '등록을 준비하는 중 작업 또는 규칙 파일이 변경되었습니다.');
 }
 
-async function provisionGeneration(provision, plan, entry) {
-  const { directory, leaseValue } = entry;
-  const { project, summary, task } = plan;
-  const fixture = await childDirectory(directory, 'fixture', { create: true, exclusive: true });
-  const state = await childDirectory(directory, 'state', { create: true, exclusive: true });
-  const fixedTask = jsonBytes(task);
-  await writeExclusive(directory, TASK, fixedTask);
-  let result;
+async function provisionLauncher(provision, input) {
   try {
-    result = await provision({
-      directory: directory.filename, fixturePath: fixture.filename, statePath: state.filename,
-      taskPath: path.join(directory.filename, TASK), leasePath: path.join(directory.filename, LEASE), leaseValue,
-      projectPath: project.filename, distro: summary.distro, linuxCwd: summary.linuxCwd, task, version: summary.version,
-    });
+    return await provision(input);
   } catch (error) {
     const code = error?.code;
     if (typeof code === 'string' && Object.hasOwn(PROVISION_ERRORS, code)) {
@@ -208,18 +244,37 @@ async function provisionGeneration(provision, plan, entry) {
     }
     throw failure('WSL_PROVISION_FAILED', 'WSL 전용 실행 파일 생성에 실패했습니다. Windows에서 사용 가능한 로컬 Go 컴파일러와 WSL 설치를 확인하세요.');
   }
+}
+
+async function provisionGeneration(provision, plan, entry, dispatcher) {
+  const { directory, leaseValue } = entry;
+  const { project, summary, task } = plan;
+  const fixture = await childDirectory(directory, 'fixture', { create: true, exclusive: true });
+  const state = await childDirectory(directory, 'state', { create: true, exclusive: true });
+  const fixedTask = jsonBytes(task);
+  await writeExclusive(directory, TASK, fixedTask);
+  const result = await provisionLauncher(provision, {
+    directory: directory.filename, fixturePath: fixture.filename, statePath: state.filename,
+    taskPath: path.join(directory.filename, TASK), leasePath: path.join(directory.filename, LEASE), leaseValue,
+    projectPath: project.filename, distro: summary.distro, linuxCwd: summary.linuxCwd, task, version: summary.version,
+  });
   await assertDirectory(fixture);
   await assertDirectory(state);
   await verifyFile(directory, TASK, fixedTask);
   const executable = (await checkedExecutable(directory, result?.executable)).filename;
   const { name, distro, linuxCwd, version, confirmation, task: taskSummary } = summary;
+  const dispatch = dispatcher && await dispatchEntry(directory, nameKey(name));
+  if (dispatch && executable !== path.join(directory.filename, 'wsl-task.exe')) {
+    throw failure('WSL_REGISTRATION_CONFLICT', '고정 실행기에 연결할 작업 실행 파일의 경로가 일치하지 않습니다.');
+  }
   const registration = {
-    schemaVersion: 2, projectKey: project.key, id: entry.id, name, distro, linuxCwd, version,
+    schemaVersion: dispatch ? 3 : 2, projectKey: project.key, id: entry.id, name, distro, linuxCwd, version,
     confirmation, taskFile: taskSummary.path, executable: path.relative(directory.filename, executable),
+    ...(dispatch && { dispatch }),
   };
   const record = jsonBytes({ ...registration, checksum: sha256(jsonBytes(registration)) });
   await writeExclusive(directory, RECORD, record);
-  return { executable, fixedTask, record };
+  return { executable, fixedTask, record, dispatch };
 }
 
 async function retire(entry) {
@@ -243,6 +298,7 @@ export async function registerWslTask(options, {
   await ruleDirectory(project);
   const key = nameKey(summary.name);
   const root = await registry(project, localAppData, platform, true);
+  const dispatcher = await readProjectRunner(root, project, await ruleDirectory(project));
   const nameDir = await childDirectory(root, `${NAME_PREFIX}${key}`, { create: true });
   return withNameLock(nameDir, async () => {
     if ((await currentGenerations(project, key, nameDir)).length) {
@@ -254,8 +310,19 @@ export async function registerWslTask(options, {
     const filename = ruleName(summary.name, id);
     let rules, bytes, published = false;
     try {
-      const { executable, fixedTask, record } = await provisionGeneration(provision, plan, entry);
-      if (await readChecked(directory, LEASE, 64)) throw failure('WSL_REGISTRATION_CONFLICT', '규칙을 게시하기 전에 활성화 표식이 생성되었습니다.');
+      const { executable, fixedTask, record, dispatch } = await provisionGeneration(provision, plan, entry, dispatcher);
+      if (await readChecked(directory, LEASE, 64)) throw failure('WSL_REGISTRATION_CONFLICT', '등록을 게시하기 전에 활성화 표식이 생성되었습니다.');
+      if (dispatcher) {
+        const descriptor = jsonBytes(dispatch);
+        await writeExclusive(dispatcher.directory, dispatchFile(id), descriptor);
+        await verifyFile(dispatcher.directory, dispatchFile(id), descriptor);
+        await verifyFile(directory, TASK, fixedTask);
+        await verifyFile(directory, RECORD, record);
+        await writeExclusive(directory, LEASE, entry.lease);
+        return {
+          state: 'registered', ...summary, id, executable: dispatcher.executable, args: [id], rulePath: dispatcher.rulePath,
+        };
+      }
       rules = await ruleDirectory(project, true);
       bytes = ruleBytes(executable);
       await publishRule(rules, filename, bytes);
@@ -284,7 +351,7 @@ async function registrationRecord(project, key, entry) {
   try { ({ checksum, ...stored } = parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(record.bytes))); }
   catch { /* A torn record has no authority. */ }
   const legacy = stored?.schemaVersion === 1 && checksum === undefined && stored.executable === 'wsl-task.exe';
-  const sealed = stored?.schemaVersion === 2 && safe(checksum, HASH) && checksum === sha256(jsonBytes(stored));
+  const sealed = [2, 3].includes(stored?.schemaVersion) && safe(checksum, HASH) && checksum === sha256(jsonBytes(stored));
   if ((!legacy && !sealed) || stored.projectKey !== project.key || stored.id !== entry.id
     || !safe(stored.name, NAME) || nameKey(stored.name) !== key || !safe(stored.distro)
     || !normalizedLinuxPath(stored.linuxCwd) || !safe(stored.version)
@@ -302,30 +369,42 @@ async function registrationRecord(project, key, entry) {
     || path.relative(entry.directory.filename, executable) !== stored.executable || path.extname(executable).toLowerCase() !== '.exe') {
     throw failure('WSL_REGISTRATION_CONFLICT', 'WSL 등록 기록의 실행 파일 경로가 유효하지 않습니다.');
   }
+  const dispatch = stored.schemaVersion === 3 ? stored.dispatch : undefined;
+  if (stored.schemaVersion === 3 && (!validDispatchEntry(dispatch, key) || stored.executable !== 'wsl-task.exe')) {
+    throw failure('WSL_REGISTRATION_CONFLICT', '고정 실행기용 WSL 등록 기록이 유효하지 않습니다.');
+  }
   const { name, distro, linuxCwd, version, taskFile, confirmation } = stored;
-  return { name, distro, linuxCwd, version, taskFile, confirmation, executable };
+  return { name, distro, linuxCwd, version, taskFile, confirmation, executable, dispatch };
 }
 
-async function describeRegistration(project, key, entry) {
+async function describeRegistration(project, key, entry, dispatcher) {
   const { id, directory, lease } = entry;
   const fallback = { state: 'conflict', name: key, id };
   try {
     const record = await registrationRecord(project, key, entry);
     if (!record) return { ...fallback, state: await readChecked(directory, LEASE, 64) ? 'conflict' : 'pending' };
-    const { name, distro, linuxCwd, version, taskFile, executable, confirmation } = record;
+    const { name, distro, linuxCwd, version, taskFile, executable, confirmation, dispatch } = record;
     const fixedTask = await readChecked(directory, TASK, MAX_BYTES);
     const task = fixedTask && taskFromBytes(fixedTask.bytes);
-    const rules = await ruleDirectory(project);
-    const filename = ruleName(name, id);
-    const expectedRule = ruleBytes(executable);
-    const rule = rules && await readChecked(rules, filename, expectedRule.length);
     await checkedExecutable(directory, executable);
-    if (!task || confirmationFor(project, record, task) !== confirmation || !rule?.bytes.equals(expectedRule)
+    if (!task || confirmationFor(project, record, task) !== confirmation
       || !(await readChecked(directory, LEASE, 64))?.bytes.equals(lease)) return { ...fallback, name };
-    return {
-      state: 'active', id, name, distro, linuxCwd, version, executable, rulePath: rule.filename,
+    const active = {
+      state: 'active', id, name, distro, linuxCwd, version,
       task: { path: taskFile, tool: task.tool, argCount: task.args.length },
     };
+    if (dispatch) {
+      if (!dispatcher) return { ...fallback, name };
+      const expected = jsonBytes(dispatch);
+      const descriptor = await readChecked(dispatcher.directory, dispatchFile(id), expected.length);
+      if (!descriptor?.bytes.equals(expected)) return { ...fallback, name };
+      return { ...active, executable: dispatcher.executable, args: [id], rulePath: dispatcher.rulePath };
+    }
+    const rules = await ruleDirectory(project);
+    const expectedRule = ruleBytes(executable);
+    const rule = rules && await readChecked(rules, ruleName(name, id), expectedRule.length);
+    if (!rule?.bytes.equals(expectedRule)) return { ...fallback, name };
+    return { ...active, executable, rulePath: rule.filename };
   } catch { return fallback; }
 }
 
@@ -337,6 +416,7 @@ export async function listWslTasks(options, dependencies = {}) {
   const tasks = [];
   if (root) {
     await assertDirectory(root);
+    const dispatcher = await ruleDirectory(project).then((rules) => readProjectRunner(root, project, rules)).catch(() => null);
     for (const folder of (await readdir(root.filename)).sort()) {
       const key = folder.slice(NAME_PREFIX.length);
       if (!folder.startsWith(NAME_PREFIX) || !NAME.test(key) || key !== key.toLowerCase()) continue;
@@ -345,7 +425,7 @@ export async function listWslTasks(options, dependencies = {}) {
         if (!nameDir) continue;
         const current = await currentGenerations(project, key, nameDir);
         if (current.length > 1) tasks.push({ state: 'conflict', name: key });
-        if (current.length === 1) tasks.push(await describeRegistration(project, key, current[0]));
+        if (current.length === 1) tasks.push(await describeRegistration(project, key, current[0], dispatcher));
       } catch { tasks.push({ state: 'conflict', name: key }); }
     }
   }
@@ -372,7 +452,10 @@ export async function unregisterWslTask(options, { localAppData = process.env.LO
     let rule = { state: 'conflict' };
     try {
       const record = await registrationRecord(project, key, entry);
-      if (record) {
+      if (record?.dispatch) {
+        // The immutable UUID descriptor may persist. An absent lease seals its launcher.
+        rule = { state: 'retained' };
+      } else if (record) {
         const rules = await ruleDirectory(project);
         rule = rules ? await removeMatchingRule(rules, ruleName(record.name, entry.id), ruleBytes(record.executable)) : { state: 'absent' };
       }

@@ -13,7 +13,7 @@ import { checkApp } from './app-check.mjs';
 import { runProjectTask } from './task.mjs';
 import { summarizeTaskRunners, collectTaskRunnerTools, attachTaskRunnerChecks } from './task-runner-checks.mjs';
 
-export const VERSION = '0.3.2';
+export const VERSION = '0.3.3';
 export const P0_IDS = ['ENV-01', 'ENV-02', 'SH-01', 'PATH-01', 'REQ-01', 'PKG-01', 'GIT-01', 'GIT-02', 'NODE-01', 'NODE-02', 'PY-01', 'PY-02', 'GO-01', 'RUST-01', 'ZIG-01', 'DOTNET-01', 'TOOLS-01', 'WSL-01', 'CTR-01', 'LD-01', 'PC-01', 'RCM-01'];
 export const P1_IDS = ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02', 'IDE-01', 'CODEX-01', 'AUX-01', 'STORE-01'];
 const LANGUAGE_TOOLS = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
