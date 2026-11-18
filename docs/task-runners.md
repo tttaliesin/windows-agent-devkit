@@ -1,0 +1,267 @@
+# 프로젝트 작업 실행기 선택 가이드
+
+이 문서는 프로젝트의 빌드·검사·개발 명령을 어떤 실행기로 묶을지 설명합니다.
+공식 자료 확인일은 2026-11-17입니다.
+플러그인 연동 설명은 0.3.0에서 추가하는 계약을 대상으로 합니다.
+0.3.0의 통합 테스트·CI·앱 검증 완료 여부는 [검증 기록](verification.md)에서 별도로 확인합니다.
+
+## 신규 프로젝트와 기존 프로젝트의 선택
+
+제약이 없는 신규 다중언어 프로젝트에는 mise tasks를 기본 권장합니다.
+도구 버전 선언과 공통 작업 진입점을 같은 구성에서 관리하려는 저장소의 선택입니다.
+기존 Task·just·Make·npm scripts는 현재 선언과 CI를 우선합니다.
+플러그인은 실행기 설치·설정 자동 변환·마이그레이션·필수 hook을 추가하지 않습니다.
+
+| 선택 | 설정 파일과 호출 예 | 적합한 요구 | 기존 구성을 유지할 이유 |
+| --- | --- | --- | --- |
+| mise tasks | `mise.toml`의 `[tasks]`, `mise run check` | 신규 다중언어 프로젝트의 도구 버전과 공통 명령 관리 | 이미 mise를 사용하는 프로젝트의 일관된 진입점 |
+| Task | `Taskfile.yml` 또는 `Taskfile.yaml`, `task check` | YAML 작업 정의와 의존 작업·입력 변경 판정 활용 | 기존 includes·플랫폼 분기·CI 작업 계약 보존 |
+| just | `justfile` 또는 `Justfile`, `just check` | 프로젝트 명령을 짧은 recipe로 제공 | 기존 recipe·인수·셸 설정과 팀 사용법 보존 |
+| GNU Make | `Makefile`, `make check` | 파일 대상과 선행 조건을 사용하는 빌드 규칙 | 기존 증분 빌드 그래프·생성 규칙·CI 보존 |
+| npm scripts | `package.json`의 `scripts`, `npm run check` | Node.js 패키지의 기존 개발 명령 | 패키지 관리자·잠금 파일·CI와의 일치 |
+
+mise도 작업 의존 순서와 캐시 기능을 지원합니다.
+`depends`로 선행 작업을 선언할 수 있습니다.
+`sources`와 `outputs`로 입력·산출물의 변경에 따른 실행 생략을 구성할 수 있습니다.
+별도의 산출물 캐시는 확인일의 문서에서 실험 기능으로 구분합니다.
+실제 프로젝트의 mise 버전이 제공하는 범위를 대조합니다. [mise 작업 설정](https://mise.jdx.dev/tasks/task-configuration.html), [mise 작업 캐시](https://mise.jdx.dev/tasks/caching.html)
+
+Task도 입력과 산출물의 변경을 기준으로 실행 여부를 정할 수 있습니다. [Task 변경 판정](https://taskfile.dev/docs/guide/up-to-date)
+just는 프로젝트 명령을 실행하는 도구로 설명됩니다. [just 매뉴얼](https://just.systems/man/en/)
+GNU Make의 규칙은 대상·선행 조건·recipe를 연결합니다. [GNU Make 규칙 문법](https://www.gnu.org/software/make/manual/html_node/Rule-Syntax.html)
+
+## 설정 파일의 최소 예시
+
+다음 예시는 설정 형식과 호출 관계를 보여줍니다.
+각 명령은 해당 프로젝트에 이미 존재하는 검사 명령으로 바꿉니다.
+예시를 읽는 것만으로 설정 파일을 생성하거나 작업을 실행하지 않습니다.
+
+### mise.toml
+
+이 예시는 Node.js 검사와 Python 검사를 공통 `check` 작업에 연결합니다.
+PowerShell 7을 사용하는 작업에는 `shell`을 명시합니다.
+런타임 버전은 기존 프로젝트의 선언을 보존합니다.
+
+```toml
+[tasks."check:node"]
+shell = "pwsh -NoProfile -NonInteractive -Command"
+run = "node --test"
+
+[tasks."check:python"]
+shell = "pwsh -NoProfile -NonInteractive -Command"
+run = "python -m unittest discover"
+
+[tasks.check]
+depends = ["check:node", "check:python"]
+```
+
+호출은 `mise run check`입니다.
+공유 자원을 사용하는 검사라면 프로젝트의 실제 실행 순서를 별도로 설계합니다.
+mise tasks의 역할과 기본 호출은 [공식 작업 안내](https://mise.jdx.dev/tasks/)를 따릅니다.
+
+### Taskfile.yml
+
+Taskfile은 YAML로 이름 있는 작업과 실행 명령을 정의합니다.
+이 예시의 `check`는 Node.js의 기존 검사 명령을 호출합니다.
+
+```yaml
+version: '3'
+tasks:
+  check:
+    cmds:
+      - node --test
+```
+
+호출은 `task check`입니다.
+Task의 `includes`나 동적 변수는 정적 진단에서 실행해 해석하지 않습니다.
+
+### Justfile
+
+Justfile은 이름 있는 recipe를 정의합니다.
+이 예시는 Windows에서 사용하는 셸을 PowerShell 7로 명시합니다.
+just 1.52.0과 호환되는 Windows 셸 설정을 사용합니다.
+
+```just
+set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
+
+check:
+    node --test
+```
+
+호출은 `just check`입니다.
+최신 공식 문서의 `[windows]`와 `set shell` 조합을 설치 버전에 그대로 적용하지 않습니다.
+공유된 just 1.52.0 실호스트 관찰에서는 이 조합이 속성 오류로 실패했습니다.
+설정 구문은 프로젝트의 just 버전과 대조합니다. [just 셸 설정](https://just.systems/man/en/shell.html)
+
+### Makefile
+
+Makefile은 대상과 선행 조건 아래에 recipe를 둡니다.
+검사처럼 파일을 만들지 않는 진입점은 `.PHONY`로 표시합니다.
+아래 `node --test` 행은 실제 탭 문자로 들여씁니다.
+
+```make
+.PHONY: check
+check:
+	node --test
+```
+
+호출은 `make check`입니다.
+플러그인은 Makefile을 읽기 위해 `make`를 실행하지 않습니다.
+
+## Windows에서 셸을 구분하는 방법
+
+실행기를 PowerShell에서 호출해도 내부 작업이 PowerShell 문법을 사용한다는 뜻은 아닙니다.
+대화형 셸과 실행기의 명령 해석기를 각각 확인합니다.
+`$env:NAME`, `%NAME%`, `$NAME`은 같은 셸 문법으로 취급하지 않습니다.
+
+| 실행기 | 확인일의 기본 동작 | PowerShell 7이 필요한 작업 |
+| --- | --- | --- |
+| mise | Windows 인라인 작업의 기본 해석기는 `cmd /c` | 작업의 `shell = "pwsh -NoProfile -NonInteractive -Command"`처럼 명시 |
+| Task | Windows에서도 내장 셸 인터프리터 사용 | 명령에서 `pwsh -NoProfile -NonInteractive -File <스크립트.ps1>` 호출 |
+| just | Windows에서도 기본값은 `sh -cu` | just 1.52.0 예시는 `set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]` 사용 |
+| GNU Make | 배포 환경과 `SHELL` 등의 설정을 확인 | 기존 recipe의 해석기를 보존하고 필요한 곳에 `pwsh` 명시 |
+
+mise의 기본 셸은 [mise 설정](https://mise.jdx.dev/configuration/settings.html)의 Windows 셸 항목을 근거로 합니다.
+Task는 대화형 셸의 시작 설정을 불러오는 방식으로 동작하지 않습니다. [Task v3.54.0 플랫폼과 셸](https://github.com/go-task/task/blob/v3.54.0/website/src/latest/docs/guide/platforms.md)
+just의 기본 셸과 Windows 재정의는 [공식 셸 안내](https://just.systems/man/en/shell.html)를 근거로 합니다.
+GNU Make의 Windows 셸 선택은 사용하는 배포와 선언을 함께 확인합니다. [GNU Make 셸 선택](https://www.gnu.org/software/make/manual/html_node/Choosing-the-Shell.html)
+
+## CI와 언어 CLI 및 서비스 관리 도구의 관계
+
+작업 실행기는 기존 언어 CLI와 프로젝트 명령을 묶는 진입점입니다.
+CI는 선택한 운영체제와 설치 환경에서 그 진입점 또는 기존 명령을 호출합니다.
+`npm run`, `python -m`, `go test`, `cargo test`, `zig build`, `dotnet test`의 의미는 각 도구에 남습니다.
+서비스의 준비 상태와 종료는 Process Compose 또는 Docker Compose의 설정과 실제 실행 결과로 확인합니다.
+작업 이름이 `check`이거나 명령이 종료됐다는 사실만으로 서비스 전체의 정상 동작을 확정하지 않습니다.
+
+```mermaid
+flowchart TB
+    Local["로컬 개발·선택 실행 검증"] --> Runner["mise tasks·Task·just·Make"]
+    CI["기존 CI의 OS·도구 설치·권한"] --> Runner
+    CI --> Lang["기존 npm scripts·언어 CLI"]
+    Runner --> Lang
+    Runner --> PC["Process Compose<br/>로컬 프로세스의 시작·준비·종료"]
+    Runner --> DC["Docker Compose<br/>컨테이너 서비스의 구성·실행"]
+```
+
+Process Compose와 Docker Compose의 선택 범위는 [개발 중 서비스 관리](windows-environment.md#개발-중-서비스-관리)에 기록합니다.
+기존 CI 호출을 실행기 도입과 함께 자동 변경하지 않습니다.
+이 저장소의 `doctor`·`test`·`check`·`build`·`package` npm scripts도 유지합니다.
+
+## 플러그인의 정적 진단 경계
+
+기본 `doctor`는 실행기 파일과 해석 가능한 작업 선언을 정적으로 탐지합니다.
+파일 존재와 작업 이름의 발견은 해당 작업의 실행 성공을 뜻하지 않습니다.
+includes·import·원격 참조·동적 변수·템플릿·Make 함수 등 지원하지 않는 표현은 `unknown`으로 남깁니다.
+탐지하지 못한 작업을 없다고 단정하지 않습니다.
+명령 원문과 환경 값은 보고서에 복사하지 않습니다.
+
+목록 조회나 dry run도 설정을 평가할 수 있습니다.
+`mise tasks ls`, `task --list`, `just --list`, `make -n`을 정적 진단의 대체 절차로 자동 실행하지 않습니다.
+mise는 작업 파일을 읽는 동안 템플릿을 평가할 수 있습니다. [mise 작업 발견과 신뢰](https://mise.jdx.dev/tasks/task-discovery.html)
+실제 명령 실행은 구체적으로 선택한 작업에 대한 `validate --execute`로 구분합니다.
+
+| 연결할 기존 ID 또는 결과 | 실행기에서 설명할 근거 |
+| --- | --- |
+| SH-01 | 실행기 내부 셸과 대화형 셸의 구분 |
+| ENV-02 | 실행 문맥과 프로젝트 내부 작업 디렉터리 |
+| PATH-01 | 선택한 실행기와 하위 언어 CLI의 실행 경로 |
+| REQ-01 | 설정 파일·작업 이름·정적 요구와 해석의 한계 |
+| RCM-01 | mise tasks 권장 차이와 기존 실행기 유지 사유 |
+| 별도 `task` 결과 | 선택한 작업의 실행 상태·종료 코드·정리 근거 |
+
+기존 P0 22개와 P1 8개의 30개 check ID 계약을 보존합니다.
+실행기용 필수 ID를 추가하지 않습니다.
+정적 탐지의 통과와 별도 `task` 결과의 성공은 서로 다른 근거입니다.
+
+## 선택한 실행기의 작업 전달
+
+`--task-file`은 플러그인 JSON을 읽는 옵션입니다.
+Go Task의 Taskfile YAML을 전달하는 옵션이 아닙니다.
+다음은 프로젝트에 선언된 `check` 작업을 선택한 JSON 예시입니다.
+
+```json
+{
+  "context": "native",
+  "trusted": true,
+  "tool": "mise",
+  "args": ["run", "check"],
+  "cwd": ".",
+  "env": {}
+}
+```
+
+| 실행기 | JSON의 `tool` | JSON의 `args` |
+| --- | --- | --- |
+| mise tasks | `mise` | `["run", "check"]` |
+| Task | `task` | `["check"]` |
+| just | `just` | `["check"]` |
+| GNU Make | `make` | `["check"]` |
+
+`cwd`는 생략할 수 있습니다.
+지정하면 대상 프로젝트 내부의 상대 경로나 절대 경로를 사용합니다.
+`env`는 선택한 자식 작업에 전달할 환경 변수 이름과 문자열 값의 객체입니다.
+이 항목은 생략할 수 있습니다.
+원시 명령 출력·환경 값·비밀 값은 작업 보고서에 넣지 않습니다.
+외부 셸 문자열로 실행기 이름과 인수를 합성하지 않습니다.
+선택한 작업은 하위 명령을 실행할 수 있으므로 의존 작업과 호출할 서비스도 검토합니다.
+호출 형식과 전체 도구 목록은 [CLI 사용법](diagnostic-cli.md#선택한-문맥의-실행-검증)에 기록합니다.
+
+플러그인 경유 mise 실행은 도구 자동 설치를 비활성화합니다.
+`trusted: true`는 선택한 플러그인 작업에 대한 실행 의사입니다.
+플러그인은 별도의 `mise trust`, 자동 응답 또는 신뢰 경로 확장을 추가하지 않습니다.
+확인일의 mise 문서는 일반 `run`의 암묵적 설정 신뢰를 안내합니다.
+mise 자체의 신뢰 처리는 설치한 버전과 paranoid 설정을 따릅니다.
+자동 설치 비활성화가 mise 자체의 암묵적 신뢰까지 차단한다는 뜻은 아닙니다.
+신뢰가 필요한 모드에서 거부되거나 필요한 도구가 없으면 실행 결과에 부족한 조건을 남깁니다.
+mise의 일반 실행 기본값과 플러그인의 실행 제한은 구분합니다. [mise 자동 설치 설정](https://mise.jdx.dev/configuration/settings.html), [mise 설정 신뢰](https://mise.jdx.dev/security.html)
+
+샌드박스에서 mise 작업을 실행할 때는 mise 상태 경로의 쓰기 범위도 확인합니다.
+공유 상태 경로를 쓸 수 없으면 작업이 `failed`로 실패할 수 있습니다.
+원시 오류와 경로는 보고서에 복사하지 않습니다.
+Windows Job 실행은 작업의 원시 출력을 수집하지 않으므로 보고서만으로 실패 원인을 확정하지 않습니다.
+사용자가 선택한 작업 JSON의 `env.MISE_STATE_DIR`로 쓰기 가능한 작업용 상태 경로를 명시할 수 있습니다.
+이 선택은 해당 작업 프로세스에만 적용됩니다.
+도구 설치를 보관하는 `MISE_DATA_DIR`와 상태를 보관하는 `MISE_STATE_DIR`를 구분합니다.
+새 상태 경로에는 기존 상태 경로의 설정 신뢰 기록이 승계되지 않습니다.
+mise의 paranoid 모드 등 설정 신뢰 정책은 그대로 적용합니다. [mise 디렉터리](https://mise.jdx.dev/directories.html)
+
+## 기존 실행기의 전환안과 유지 사유
+
+현재 실행기의 선언·작업·셸·작업 디렉터리·CI 호출을 먼저 정적으로 확인합니다.
+RCM-01에는 mise tasks 권장안과 현재 구성의 차이를 설명합니다.
+전환안에는 보존할 명령·변경할 진입점·검증할 동작·복구할 파일을 적습니다.
+유지를 선택하면 해당 프로젝트의 이유와 적용 범위를 남깁니다.
+검토 요청만으로 Taskfile·Justfile·Makefile·npm scripts를 재작성하지 않습니다.
+
+| 관찰한 구성 | 제시할 전환안 | 유지 사유의 예 |
+| --- | --- | --- |
+| npm scripts가 언어별 검사 제공 | 기존 script를 호출하는 mise 작업을 선택적으로 추가 | 단일 패키지이며 공통 실행기 추가 필요가 없음 |
+| Task includes와 CI 작업이 연결됨 | 포함 파일·의존 관계·동적 필드를 먼저 대조 | 기존 Task 계약과 플랫폼 분기의 유지가 필요 |
+| just recipe가 팀 명령을 제공 | 인수·변수 평가·셸 설정을 대조 | 현재 recipe 사용법과 CI가 요구를 충족 |
+| Makefile이 산출물 의존 관계를 관리 | 기존 Make 규칙을 호출하는 공통 진입점 검토 | 파일 기반 증분 빌드와 생성 규칙의 유지가 필요 |
+
+전환으로 동작이 같아진다는 가설은 같은 소스와 도구 버전에서 기존 명령과 후보 진입점을 비교해 확인합니다.
+종료 코드·산출물·선택한 서비스의 정리 결과가 다르면 동등하다는 가설을 기각합니다.
+실제로 비교하지 않은 전환안은 미검증 제안으로 표시합니다.
+성능 비교가 필요하면 같은 작업과 캐시 조건에서 실행 시간을 별도로 측정합니다.
+
+## 공식 자료의 적용 범위
+
+확인일은 2026-11-17입니다.
+mise 링크는 확인일의 공식 문서를 대상으로 합니다.
+Task의 Windows 셸 근거는 v3.54.0으로 고정합니다.
+just 매뉴얼과 GNU Make 매뉴얼은 실제 설치 버전의 지원 범위와 대조합니다.
+
+| 도구 | 공유된 실호스트 설치 버전 | 문서와 예시의 적용 범위 |
+| --- | --- | --- |
+| mise | 2026.9.4 | 최신 문서의 기능·설정이 해당 버전에도 있는지 별도 확인 |
+| Task | 3.54.0 | Windows 셸의 고정 출처인 v3.54.0 문서와 대조 |
+| just | 1.52.0 | 위 Justfile 예시는 `set windows-shell` 형식 사용 |
+
+mise와 Task의 버전 조회 결과에 제품명 접두사가 있다고 가정하지 않습니다.
+공유된 mise 2026.9.4와 Task 3.54.0 호스트의 버전 출력은 제품명 접두사가 없는 형식입니다.
+이 설치 버전과 관찰은 통합 담당자가 공유한 근거입니다.
+본 문서 작업에서 실행기 예시를 실호스트에서 재실행한 결과가 아닙니다.
+공식 문서 확인은 현재 PC에서 네 실행기의 실제 작업을 실행한 결과가 아닙니다.
+플러그인의 구현·패키지·앱 검증 결과는 [검증 기록](verification.md)의 해당 버전 근거를 따릅니다.

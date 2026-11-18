@@ -1,0 +1,35 @@
+name: Windows diagnostics
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Build standalone CLI
+        run: npm run build
+      - name: Test diagnostics
+        run: npm test
+      - name: Check plugin source and documents
+        run: npm run check
+      - name: Package local marketplace
+        run: npm run package
+      - name: Smoke test packaged CLI without node_modules
+        run: node scripts/check-package.mjs --packaged
+      - name: Smoke test controlled Windows workflows
+        run: node scripts/smoke-windows.mjs

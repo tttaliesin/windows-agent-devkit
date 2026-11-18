@@ -3,7 +3,7 @@
 ## Scope
 
 This repository contains a Windows development-environment proposal and a local Codex plugin project.
-The current stage is repository initialization and scope documentation.
+The implementation includes read-only diagnostics, reviewed setup and rollback, scoped execution validation, and a bundled local plugin package.
 Read README.md and the relevant document under docs/ before changing behavior.
 Keep planned features separate from implemented and verified features.
 
@@ -16,6 +16,8 @@ Use existing Codex capabilities where they satisfy the workflow.
 Add an MCP server only when a concrete capability requires one.
 Keep plugin source separate from account registration, installation, and publication.
 Do not introduce mandatory workflow dependencies without a task-related reason.
+Use Node.js 24 or later and PowerShell 7 for the diagnostic CLI.
+Run `node --test` for behavior checks and `node scripts/check-package.mjs` for plugin-source and document checks.
 
 ## Windows commands
 
