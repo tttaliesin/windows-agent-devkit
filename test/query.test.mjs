@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createQuery, queryEnvironment, isReadOnlyQuery } from '../src/query.mjs';
 import { runBounded } from '../src/windows.mjs';
+import { validateEnvironment } from '../src/validation.mjs';
 
 const WINDOWS = process.platform === 'win32' || '실제 Windows 경로의 PE 검증을 사용하는 정적 fixture';
 const SECRET = 'QUERY_PRIVATE_SENTINEL';
@@ -109,6 +110,31 @@ test('기본 조회는 options.env의 hook·자동 설치 우회도 제거한다
   assert.equal(env.MISE_NO_HOOKS, '1');
   assert.equal(env.MISE_NO_ENV, '1');
   assert.ok(!JSON.stringify(env).includes(SECRET));
+});
+
+test('WSL 사전 조회와 선택 작업은 실제 query의 인수 검증을 통과한다', { skip: WINDOWS !== true && WINDOWS }, async (t) => {
+  const f = await fixture(t, { tool: 'wsl' });
+  const commands = [];
+  const query = createQuery({ ...f.options, run: async (executable, args) => {
+    assert.equal(executable, f.executable);
+    const command = args.some((arg) => arg === '/bin/sh') ? '/bin/sh' : args.at(-1);
+    commands.push(command);
+    const output = {
+      '/bin/sh': 'OS=Linux\nARCH=x86_64\nCWD=/fixture\nsh=/bin/sh\nbash=/bin/bash\n',
+      '--version': 'GNU bash, version 5.2.0',
+      '/usr/bin/true': '',
+    };
+    if (!Object.hasOwn(output, command)) return { state: 'failed', exitCode: 1 };
+    return { state: 'succeeded', exitCode: 0, stdout: output[command], stderr: '' };
+  } });
+  const report = await validateEnvironment({ projectPath: f.projectPath, query,
+    options: { execute: true, distro: 'FixtureLinux', linuxCwd: '/fixture', linuxTools: ['bash'],
+      task: { context: 'wsl', trusted: true, tool: '/usr/bin/true', args: [] } } });
+  const wsl = report.checks.find(({ checkId }) => checkId === 'WSL-02');
+  assert.deepEqual(commands, ['/bin/sh', '--version', '/usr/bin/true']);
+  assert.equal(wsl.status, 'pass');
+  assert.equal(wsl.execution, 'succeeded');
+  assert.equal(wsl.evidence.steps.find(({ phase }) => phase === 'task')?.exitCode, 0);
 });
 
 test('projectTask:true만으로는 프로젝트 실행 파일을 허용하지 않고 execute:true도 함께 필요하다', { skip: WINDOWS !== true && WINDOWS }, async (t) => {

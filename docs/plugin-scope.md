@@ -1,7 +1,7 @@
 # Codex 플러그인의 기능 범위
 
-이 문서는 0.2.1 로컬 플러그인의 구현 범위와 남은 앱 검증을 구분합니다.
-기준일은 2026-11-17입니다.
+이 문서는 로컬 플러그인이 다루는 점검·변경·실행 검증의 범위를 설명합니다.
+배포 버전과 실제 Codex 앱 검증 결과는 [검증 기록](verification.md)에서 확인합니다.
 명령 사용법은 [진단 CLI 사용법](diagnostic-cli.md)에 기록합니다.
 전체 제품의 목적은 [프로젝트 범위](project-scope.md)에 기록합니다.
 
@@ -31,6 +31,7 @@ Python 가상환경은 선언된 요구와 실제 선택된 인터프리터의 �
 Process Compose의 셸·작업 경로·의존·건강 확인·포트는 정적으로 확인합니다.
 Compose 서비스와 devcontainer 문맥은 별도 근거로 기록합니다.
 DB 서비스가 있다는 이유로 앱의 호스트 언어 요구를 제외하지 않습니다.
+mise tasks·Taskfile·Justfile·Makefile·npm scripts는 선언을 정적으로 확인합니다.
 
 기본 점검은 설치·사용자 프로필 변경·프로젝트 명령 실행·서비스 기동을 수행하지 않습니다.
 WSL 호스트 조회는 배포판 내부 실행과 구분합니다.
@@ -60,15 +61,20 @@ Lazydocker는 TUI 기동 없이 명령과 관련 메타데이터를 확인합니
 
 `validate --execute`는 선택한 실행 문맥을 검증합니다.
 Rust 링크, WSL 배포판 내부, Docker context·로컬 이미지·Compose, Process Compose 서비스를 대상으로 합니다.
+Rust 링크 검증은 `--rust-targets` 또는 작업 JSON의 `context: "rust"`로 명시합니다.
+WSL 검증은 기존 배포판과 배포판 내부의 Linux 절대 작업 경로를 사용합니다.
+실행 대상 없이 메타데이터만 확인할 때는 `doctor`를 사용합니다.
 서비스의 시작·준비 상태·종료를 별도 근거로 남깁니다.
 준비 검사 없이 실행 중인 서비스를 준비 완료로 판정하지 않습니다.
 자체 생성 자원과 자식 세션만 정리합니다.
 
 `--task-file`은 선택한 개발 명령을 별도로 전달합니다.
 `context: "native"`는 허용한 도구와 인수 배열을 프로젝트의 호스트 작업 경로에서 실행합니다.
+`native`로 선택할 수 있는 도구에는 `mise`·`task`·`just`·`make`가 포함됩니다.
 이 작업에는 `trusted: true`와 `--execute`가 필요합니다.
-`context: "rust"`와 `context: "wsl"`은 해당 실행 검증에서 사용합니다.
-호스트 작업의 상태와 종료 코드는 보고서의 별도 `task` 필드에 기록합니다.
+`native` 작업의 상태와 종료 코드는 `report.task`에 기록합니다.
+`rust`와 `wsl` 작업의 근거는 `report.validation`에서 해당 ID의 `steps` 아래 `task` 단계에 기록합니다.
+실행하지 못한 선택 작업 등 명시적으로 선택한 검증 항목이 `unknown` 또는 `skipped`이면 `validate --execute`는 종료 코드 1을 반환합니다.
 원시 표준 출력·표준 오류·환경 값은 작업 보고서에 포함하지 않습니다.
 실제 프로젝트의 전체 개발 흐름 성공은 해당 명령을 실행한 결과로 확인해야 합니다.
 
@@ -76,9 +82,10 @@ Rust 링크, WSL 배포판 내부, Docker context·로컬 이미지·Compose, Pr
 flowchart TB
     Input["프로젝트와 사용자 선택"] --> Read["doctor: 읽기 전용 점검"]
     Read --> Plan["plan: 보존 조건과 변경 계획"]
+    Read --> Validate["validate --execute: 선택 문맥과 신뢰한 작업"]
     Plan --> Apply["apply --execute: 선택한 변경"]
     Plan --> Keep["exception --execute: 기존 구성 유지"]
-    Apply --> Validate["validate --execute: 선택 문맥과 신뢰한 작업"]
+    Apply --> Validate
     Apply --> Rollback["rollback --execute: 자체 변경 복구"]
 ```
 
@@ -96,36 +103,16 @@ flowchart TB
 클라우드 서버와 사이트 호스팅을 기본 의존성으로 두지 않습니다.
 번들에는 실행 의존성 네 개를 포함합니다.
 esbuild는 빌드할 때만 사용합니다.
+배포 패키지는 설치 루트의 `dist/cli.mjs`를 진입점으로 사용합니다.
+설치와 대상 프로젝트의 경로 지정 방법은 [CLI 사용법](diagnostic-cli.md#실행-전제조건)에 기록합니다.
 
 `--app`은 앱과 공유하는 플러그인 설치 목록을 조회합니다.
 `--ide`는 VS Code와 네이티브 빌드 도구의 선택적 점검을 요청합니다.
-설치 목록·설정 메타데이터와 실제 Skill 호출은 다른 관찰입니다.
-로컬 패키지 빌드와 참조 검사를 앱 설치 성공으로 보고하지 않습니다.
-로컬 플러그인 0.2.0의 설치와 `enabled: true`를 확인했습니다.
-Codex 앱의 플러그인 화면에서 Skill 세 개를 발견했습니다.
-화면 스크린샷은 추적하지 않는 `.local/`에 보관합니다.
-앱의 최초 0.2.0 실제 호출에서 30개 ID 보고서와 `CODEX-01: pass`를 확인했습니다.
-현재 패키지와 소스는 0.2.1이며 최신 실제 앱 재호출을 완료했습니다.
-일반 샌드박스의 `use_default` 첫 실행에서 권한 상승 없이 종료 코드 0을 확인했습니다.
-메타데이터 출처는 `context.metadataSource: local-process-and-registry`입니다.
-checkId 30개가 모두 고유하며 결과는 통과 11개·실패 0개·검토 0개·미확인 4개·생략 15개입니다.
-`CODEX-01: pass`에서 설치·활성과 버전 0.2.1을 확인했습니다.
-새 터미널의 수동 설정 선택과 셸·프로필 적용은 별도 검증이 남아 있습니다.
-계정 등록·공개 게시·배포 정책 확정도 현재 구현 완료에 포함하지 않습니다.
+실제 Skill 호출의 근거는 Codex 앱에서 설치본의 CLI를 실행한 기록입니다.
 
-실제 Windows에서 30개 ID의 보고서와 Node.js·Python 실행을 확인했습니다.
-Go는 PE 내장 버전을 확인한 결과입니다.
-통제된 임시 프로젝트의 계획·적용·재적용·복구·예외 저장과 npm 작업은 실제 실행에서 통과했습니다.
-Windows Job helper로 Process Compose 실서비스의 start·readiness·stop이 모두 통과했습니다.
-정리 근거는 `forced: false`와 `proof: windows_job_empty`입니다.
-0.2.1에는 샌드박스 권한 완화 없이 로컬 CIM 조회 실패를 대체하는 읽기 전용 메타데이터 경로를 반영했습니다.
-WSL은 기존 Ubuntu-24.04의 지정 경로에서 `--linux-tools bash` 고정 조회로 `WSL-02: pass`를 확인했습니다.
-전체 언어 도구의 WSL 설치와 프로젝트 개발 명령 실행은 이 결과에 포함하지 않습니다.
-Docker 엔진은 검증할 호스트가 없어 CI·모의 조회와 실제 실행을 구분합니다.
-
-## 0.1 구현 이력
+## 이전 구현 이력
 
 0.1.0은 제한된 정적 분석과 로컬 조회를 제공하는 첫 플러그인 소스였습니다.
 설정 적용과 P1 실행 검증을 후속 범위로 남겼습니다.
 0.2에는 계획·적용·복구·예외·선택 실행 검증을 구현했습니다.
-실제 호스트와 앱의 검증은 구현 진도와 별도로 관리합니다.
+0.2.1 및 이전 버전의 실제 호출은 과거 검증 이력입니다. [검증 기록](verification.md)

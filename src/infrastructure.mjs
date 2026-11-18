@@ -1,5 +1,5 @@
 import { lstat, readFile } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, posix, win32 } from 'node:path';
 import { decodeOutput } from './windows.mjs';
 import { evaluateVersion } from './versions.mjs';
 import { parseDocument } from 'yaml';
@@ -49,17 +49,70 @@ async function nodeManager(project, host) {
   return check('NODE-02', status, !version ? 'wrapper_target_not_verified' : assessment?.reason ?? 'manager_metadata_observed', version ? '설치된 관리자 패키지의 버전 메타데이터와 선언을 비교했습니다.' : '명령 래퍼의 실제 관리자 버전을 정적으로 확인하지 못했습니다.', observed, { resolution: 'resolved', resolvedPath: candidate.path, compatibility: status === 'pass' ? 'satisfied' : status === 'fail' ? 'violated' : 'unknown', recommendation: { status: 'aligned', expected: '프로젝트의 기존 패키지 관리자' } });
 }
 
+function environmentPath(value) {
+  if (typeof value !== 'string' || value.length > 32767 || /[\x00-\x1f\x7f]|:\/\//.test(value)) return null;
+  if (/^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(value)) {
+    if (/[<>:"|?*]/.test(value.replace(/^[A-Za-z]:/, '')) || /^[\\/]{2}\.{1,2}[\\/]/.test(value)) return null;
+    return { api: win32, key: win32.normalize(value).replace(/\\+$/, '').toLowerCase() };
+  }
+  if (process.platform !== 'win32' && /^\/(?!\/)/.test(value)) {
+    return { api: posix, key: posix.normalize(value).replace(/\/+$/, '') };
+  }
+  return null;
+}
+
+function localPythonEnvironment(entry) {
+  // analyzeProject observes these locations relative to the requested root, even for a workspace member.
+  return (entry?.directory === '.venv' && ['.venv/pyvenv.cfg', '.venv'].includes(entry.source)) ||
+    (entry?.directory === '.' && entry.source === 'pyvenv.cfg');
+}
+
 function pythonEnvironment(project, host) {
   const req = project.requirements.python;
   if (req.state === 'not_required') return skip('PY-02', 'Python 의존성 관리 요구가 없습니다.');
-  const environments = req.metadata?.virtualEnvironments ?? [];
-  const runtime = host.probes?.python?.data;
-  const selected = runtime?.prefix && runtime?.basePrefix ? { prefix: runtime.prefix, basePrefix: runtime.basePrefix, isolated: runtime.prefix.toLowerCase() !== runtime.basePrefix.toLowerCase() } : null;
-  const observed = { managers: req.packageManagers, lockFiles: req.lockFiles, environments, selected, uv: binary(host, 'uv') ?? null };
-  if (req.state === 'unknown') return check('PY-02', 'unknown', 'requirement_unknown', 'Python 환경 선언을 확정하지 못했습니다.', observed, { applicability: 'unknown' });
-  const malformed = environments.some((i) => i.state === 'unknown');
-  const declared = environments.length > 0;
-  return check('PY-02', malformed || !selected ? 'unknown' : declared && !selected.isolated ? 'warn' : 'pass', malformed ? 'virtual_environment_metadata_unknown' : !selected ? 'interpreter_environment_unknown' : declared && !selected.isolated ? 'declared_environment_not_selected' : 'python_environment_observed', 'Python의 실제 prefix와 가상환경 선언을 구분해 확인했습니다.', observed, { recommendation: { status: binary(host, 'uv') ? 'aligned' : 'different', expected: 'uv와 프로젝트별 가상환경' } });
+  const declarations = req.metadata?.virtualEnvironments ?? [];
+  const environments = Array.isArray(declarations) ? declarations.filter(localPythonEnvironment) : [];
+  const probe = host.probes?.python;
+  const runtime = probe?.state === 'succeeded' ? probe.data : null;
+  const prefix = environmentPath(runtime?.prefix), base = environmentPath(runtime?.basePrefix);
+  const selected = prefix && prefix.api === base?.api
+    ? { prefix: runtime.prefix, basePrefix: runtime.basePrefix, isolated: prefix.key !== base.key }
+    : null;
+  const uv = binary(host, 'uv') ?? null;
+  const observed = { managers: req.packageManagers, lockFiles: req.lockFiles, environments, selected, uv };
+  const report = (status, reason, message, extra) => check('PY-02', status, reason, message, observed, {
+    recommendation: { status: uv ? 'aligned' : 'different', expected: 'uv와 프로젝트별 가상환경' },
+    ...extra,
+  });
+
+  if (req.state === 'unknown') return report('unknown', 'requirement_unknown', 'Python 환경 선언을 확정하지 못했습니다.', { applicability: 'unknown' });
+  if (!Array.isArray(declarations) || environments.length !== declarations.length || environments.some((entry) => entry.state !== 'required')) {
+    return report('unknown', 'virtual_environment_metadata_unknown', '현재 프로젝트 범위에서 가상환경의 경로 또는 pyvenv.cfg 메타데이터를 확인할 수 없습니다.');
+  }
+  if (runtime?.prefix == null || runtime?.basePrefix == null) {
+    return report('unknown', 'interpreter_environment_unknown', '현재 인터프리터의 두 prefix를 조회한 근거가 부족합니다.');
+  }
+  if (!selected) {
+    return report('unknown', 'interpreter_environment_path_invalid', '현재 인터프리터의 두 prefix를 비교 가능한 절대 경로로 해석할 수 없습니다.');
+  }
+  if (!environments.length) {
+    return selected.isolated
+      ? report('unknown', 'external_virtual_environment_unverified', '현재 가상환경이 프로젝트에 적용되는지 확인할 경로 근거가 부족합니다.')
+      : report('unknown', 'project_environment_not_observed', '현재 Python의 두 prefix가 같으며 프로젝트 환경의 소속을 확인할 메타데이터가 부족합니다.');
+  }
+  const root = environmentPath(project.root);
+  if (!root || root.api !== prefix.api) {
+    return report('unknown', 'project_environment_path_unknown', '프로젝트 경로를 현재 인터프리터의 prefix와 비교할 수 없습니다.');
+  }
+  const matches = environments.some((entry) => environmentPath(root.api.join(project.root, entry.directory))?.key === prefix.key);
+  if (matches) {
+    return selected.isolated
+      ? report('pass', 'project_environment_selected', '현재 인터프리터의 prefix가 프로젝트에서 확인한 가상환경 경로와 일치합니다.')
+      : report('unknown', 'project_environment_prefix_conflict', '프로젝트 가상환경 경로와 일치하는 두 prefix가 서로 같아 가상환경 선택 여부를 확정할 수 없습니다.');
+  }
+  return selected.isolated
+    ? report('warn', 'different_virtual_environment_selected', '현재 인터프리터는 프로젝트에서 확인한 경로와 다른 가상환경을 사용합니다.')
+    : report('warn', 'declared_environment_not_selected', '현재 인터프리터의 두 prefix가 같은 경로를 가리키며 프로젝트 가상환경 경로와 차이가 있습니다.');
 }
 
 export async function collectInfrastructure({ project, host, options = {}, query }) {
@@ -67,7 +120,15 @@ export async function collectInfrastructure({ project, host, options = {}, query
   if (!options.wsl && options.distro === undefined) checks.push(skip('WSL-01', 'WSL 점검 대상이 선택되지 않았습니다.'));
   else {
     const q = host.probes?.wsl;
-    checks.push(check('WSL-01', q?.state === 'succeeded' ? 'pass' : q?.state === 'not_found' ? 'fail' : 'unknown', q?.state === 'succeeded' ? 'wsl_host_observed' : q?.state ?? 'not_queried', 'WSL 호스트 버전·설치 배포판 목록을 확인했습니다.', q?.data ?? {}, { resolution: binary(host, 'wsl') ? 'resolved' : 'not_resolved', execution: q?.state === 'succeeded' ? 'succeeded' : 'not_run', resolvedPath: q?.executable ?? null }));
+    const complete = q?.state === 'succeeded' && Boolean(q.version) && Array.isArray(q.data?.distributions);
+    const status = complete ? 'pass' : q?.state === 'not_found' ? 'fail' : 'unknown';
+    const reason = complete ? 'wsl_host_observed' : q?.data?.queries?.length ? 'wsl_host_metadata_incomplete' : q?.state ?? 'not_queried';
+    const message = complete ? 'WSL 호스트 버전과 설치 배포판 목록을 확인했습니다.' : 'WSL 호스트 버전과 설치 배포판 목록의 조회 근거가 부족합니다.';
+    checks.push(check('WSL-01', status, reason, message, q?.data ?? {}, {
+      resolution: binary(host, 'wsl') ? 'resolved' : 'not_resolved',
+      execution: ['succeeded', 'failed', 'timed_out'].includes(q?.state) ? q.state : 'not_run',
+      resolvedPath: q?.executable ?? null,
+    }));
   }
   const container = options.containers ? 'required' : project.environment.containers;
   if (container === 'not_required') checks.push(skip('CTR-01', '컨테이너 요구가 없습니다.'), skip('LD-01', '컨테이너 관리 요구가 없습니다.'));

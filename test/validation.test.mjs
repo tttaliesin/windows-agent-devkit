@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { validateEnvironment } from '../src/validation.mjs';
+import { analyzeProject } from '../src/project.mjs';
+import { VALIDATION_CHECK_IDS, validateEnvironment } from '../src/validation.mjs';
 import { startServiceSession } from '../src/service-session.mjs';
 
 const PROJECT = path.resolve('test validation project; $(literal)');
@@ -17,6 +18,8 @@ const failure = (state = 'failed', stderr = 'SECRET_MUST_NOT_LEAK') => ({ state,
 const check = (report, id) => report.checks.find((item) => item.checkId === id);
 const stages = (report, id) => report.evidence[id].steps;
 const has = (report, id, phase, status) => stages(report, id).some((item) => item.phase === phase && item.status === status);
+const taskStep = (report, id) => stages(report, id).find((item) => item.phase === 'task');
+const LINUX_CONTEXT = 'OS=Linux\nARCH=x86_64\nCWD=/src\nsh=/bin/sh';
 
 async function fixture(action, { probe = true, extra = '' } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'validation-test-'));
@@ -82,12 +85,14 @@ function dockerQuery({ createFails = false, startFails = false, ready = true, fo
 }
 
 test('실행 동의가 없으면 모든 지정 대상에 scoped skipped를 반환하고 query·세션을 호출하지 않는다', async () => {
+  assert.deepEqual(VALIDATION_CHECK_IDS, ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02']);
   for (const execute of [undefined, false, 'true', 1]) {
     let calls = 0;
     const report = await validateEnvironment({ projectPath: PROJECT, project: { requirements: { rust: { state: 'required' } } },
-      options: { execute, distro: 'Ubuntu', linuxCwd: '/home/user/source', dockerContext: 'chosen', serviceConfig: 'process-compose.yaml', services: ['api'], startSession: () => { calls++; } },
+      options: { execute, rustTarget: 'x86_64-pc-windows-msvc', distro: 'Ubuntu', linuxCwd: '/home/user/source', dockerContext: 'chosen', serviceConfig: 'process-compose.yaml', services: ['api'], startSession: () => { calls++; } },
       query: async () => { calls++; assert.fail('No query without consent'); } });
     assert.equal(calls, 0);
+    assert.deepEqual(report.checks.map((item) => item.checkId), VALIDATION_CHECK_IDS);
     assert.deepEqual(report.checks.map((item) => [item.status, item.reason, item.execution]), Array(4).fill(['skipped', 'execute_required', 'not_run']));
     assert.equal(report.evidence['WSL-02'].scope.cwd, '/home/user/source');
     assert.deepEqual(report.evidence['PC-02'].scope.services, ['api']);
@@ -98,6 +103,25 @@ test('선택되지 않은 선택적 도구는 execute 동의가 있어도 조회
   const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true }, query: () => assert.fail('unselected') });
   assert.ok(report.checks.every((item) => item.status === 'skipped' && item.reason === 'target_not_selected'));
 });
+
+test('Cargo 선언이 있어도 native 작업의 실행 요청은 Rust 링크 검증을 선택하지 않는다', async () => fixture(async (directory) => {
+  await writeFile(path.join(directory, 'Cargo.toml'), '[package]\nname = "validation-fixture"\nversion = "0.1.0"\n');
+  const project = await analyzeProject(directory);
+  assert.equal(project.requirements.rust.state, 'required');
+  const probes = [];
+  const task = { context: 'native', trusted: true, tool: 'npm', args: ['test'] };
+  const report = await validateEnvironment({ projectPath: directory, project, options: { execute: true, task }, query: async (tool, args) => {
+    if (tool === 'rustc' && args[0] === '-vV') {
+      probes.push('compiler');
+      return success('host: x86_64-pc-windows-msvc');
+    }
+    probes.push(tool === 'rustc' && args.includes('--emit=link') ? 'link' : 'unexpected');
+    return success();
+  } });
+  assert.deepEqual(probes, []);
+  const { applicability, status, execution } = check(report, 'RUST-02');
+  assert.deepEqual([applicability, status, execution], ['not_required', 'skipped', 'not_run']);
+}));
 
 test('누락된 명시적 경로·서비스와 잘못된 제한 시간은 기동 전에 보류한다', async () => {
   const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, distro: 'Ubuntu', serviceConfig: 'services.yaml' }, query: () => assert.fail('no implicit target') });
@@ -145,6 +169,59 @@ test('Rust가 성공해도 링크 파일이 없으면 완료로 보고하지 않
   assert.equal(check(report, 'RUST-02').status, 'unknown');
 });
 
+test('Rust 작업을 명시하면 프로젝트 target으로 링크를 검증한 뒤 선택한 작업을 실행한다', async () => {
+  const target = 'aarch64-pc-windows-msvc';
+  const project = { requirements: { rust: { state: 'required', metadata: { targets: [target] } } } };
+  const task = { context: 'rust', tool: 'cargo', args: ['check'], trusted: true };
+  const calls = [];
+  const report = await validateEnvironment({ projectPath: PROJECT, project, options: { execute: true, task }, query: async (tool, args) => {
+    if (tool === 'cargo') { calls.push('task'); return success(); }
+    assert.equal(tool, 'rustc');
+    if (args[0] === '-vV') { calls.push('compiler'); return success('host: x86_64-pc-windows-msvc'); }
+    assert.equal(args[args.indexOf('--target') + 1], target);
+    assert.ok(args.includes('--emit=link'));
+    calls.push('link');
+    await writeFile(args[args.indexOf('-o') + 1], 'controlled linked artifact');
+    return success();
+  } });
+  assert.deepEqual(calls, ['compiler', 'link', 'task']);
+  const { applicability, status, execution } = check(report, 'RUST-02');
+  assert.deepEqual([applicability, status, execution], ['required', 'pass', 'succeeded']);
+  assert.equal(taskStep(report, 'RUST-02').exitCode, 0);
+});
+
+test('일부 WSL 옵션 또는 WSL 작업만 지정해도 선택되며 배포판과 절대 경로가 없으면 미실행을 보고한다', async () => {
+  let calls = 0;
+  const task = { context: 'wsl', tool: '/bin/bash', args: ['check.sh'], trusted: true };
+  for (const options of [{ distro: 'Ubuntu' }, { linuxCwd: '/src' }, { linuxTools: ['bash'] }, { task }, { distro: 'Ubuntu', linuxCwd: 'src', task }]) {
+    const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, ...options }, query: async () => { calls++; return success(); } });
+    const { applicability, status, reason, execution } = check(report, 'WSL-02');
+    assert.deepEqual([applicability, status, reason, execution], ['required', 'skipped', 'linux_cwd_required', 'not_run']);
+    if (options.task) assert.equal(taskStep(report, 'WSL-02').execution, 'not_run');
+  }
+  assert.equal(calls, 0);
+});
+
+test('Rust와 WSL의 선행 조회가 실패하거나 실행되지 않으면 작업 미실행 근거를 남긴다', async () => {
+  const rust = { task: { context: 'rust', tool: 'cargo', args: ['check'], trusted: true } };
+  const wsl = { distro: 'Ubuntu', linuxCwd: '/src', linuxTools: ['bash'], task: { context: 'wsl', tool: '/bin/bash', args: ['check.sh'], trusted: true } };
+  for (const [id, options, phase, firstOutput] of [
+    ['RUST-02', rust, 'link', 'host: x86_64-pc-windows-msvc'],
+    ['WSL-02', wsl, 'tool', `${LINUX_CONTEXT}\nbash=/bin/bash`],
+  ]) {
+    for (const [state, expectedStatus] of [['failed', 'fail'], ['not_run', 'unknown']]) {
+      let calls = 0;
+      const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, ...options }, query: async () => ++calls === 1 ? success(firstOutput) : failure(state) });
+      assert.equal(calls, 2);
+      const { applicability, status, reason, execution } = check(report, id);
+      assert.deepEqual([applicability, status, reason, execution], ['required', expectedStatus, state, 'not_run']);
+      assert.ok(has(report, id, phase, expectedStatus));
+      const task = taskStep(report, id);
+      assert.deepEqual([task.status, task.reason, task.execution, task.exitCode], ['skipped', 'not_started', 'not_run', null]);
+    }
+  }
+});
+
 test('WSL은 지정 distro·Linux cwd·셸·도구 버전으로 검사하고 신뢰 작업만 argv로 실행한다', async () => {
   const cwd = '/home/test/source $(literal); dir', calls = [];
   const project = { requirements: { node: { state: 'required', versionRequests: [{ kind: 'range', value: '>=24 <25' }], metadata: {} } } };
@@ -160,6 +237,8 @@ test('WSL은 지정 distro·Linux cwd·셸·도구 버전으로 검사하고 신
     assert.deepEqual(args.slice(-3), ['/usr/bin/node', ...task.args]); return success('PRIVATE_TASK_OUTPUT');
   } });
   assert.equal(check(report, 'WSL-02').status, 'pass');
+  assert.equal(check(report, 'WSL-02').execution, 'succeeded');
+  assert.equal(taskStep(report, 'WSL-02').exitCode, 0);
   assert.equal(report.evidence['WSL-02'].context.cwd, cwd);
   assert.equal(calls.length, 5);
   assert.doesNotMatch(JSON.stringify(report), /PRIVATE_TASK_OUTPUT|literal\)"\]/);
@@ -177,8 +256,29 @@ test('WSL의 Windows 실행 파일·shim과 요구 버전 위반을 Linux 준비
 
 test('신뢰하지 않은 WSL 작업은 실행하지 않는다', async () => {
   let calls = 0;
-  const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, distro: 'Ubuntu', linuxCwd: '/src', linuxTools: [], task: { context: 'wsl', tool: '/usr/bin/node', args: ['test.mjs'] } }, query: async () => { calls++; return success('OS=Linux\nARCH=x86_64\nCWD=/src\nsh=/bin/sh'); } });
-  assert.equal(calls, 1); assert.ok(has(report, 'WSL-02', 'task', 'skipped'));
+  const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, distro: 'Ubuntu', linuxCwd: '/src', linuxTools: [], task: { context: 'wsl', tool: '/usr/bin/node', args: ['test.mjs'] } }, query: async () => { calls++; return success(LINUX_CONTEXT); } });
+  assert.equal(calls, 1);
+  const { applicability, status, reason, execution } = check(report, 'WSL-02');
+  assert.deepEqual([applicability, status, reason, execution], ['required', 'unknown', 'trusted_task_required', 'not_run']);
+  const task = taskStep(report, 'WSL-02');
+  assert.deepEqual([task.status, task.execution, task.exitCode], ['skipped', 'not_run', null]);
+});
+
+test('WSL 선행 조회에 성공해도 작업의 미실행과 종료 코드가 있는 실패를 그대로 기록한다', async () => {
+  const task = { context: 'wsl', tool: '/usr/bin/node', args: ['PRIVATE_TASK_ARG'], trusted: true };
+  for (const [state, exitCode, expectedStatus, expectedExecution] of [
+    ['not_run', null, 'unknown', 'not_run'], ['not_found', null, 'fail', 'not_run'], ['failed', 23, 'fail', 'failed'],
+  ]) {
+    let calls = 0;
+    const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, distro: 'Ubuntu', linuxCwd: '/src', linuxTools: [], task },
+      query: async () => ++calls === 1 ? success(LINUX_CONTEXT) : { ...failure(state), exitCode, arguments: task.args, stdout: 'PRIVATE_TASK_OUTPUT' } });
+    assert.equal(calls, 2);
+    const { applicability, status, reason, execution } = check(report, 'WSL-02');
+    assert.deepEqual([applicability, status, reason, execution], ['required', expectedStatus, state, expectedExecution]);
+    const phase = taskStep(report, 'WSL-02');
+    assert.deepEqual([phase.status, phase.reason, phase.execution, phase.exitCode], [expectedStatus, state, expectedExecution, exitCode]);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE_TASK_|SECRET_MUST_NOT_LEAK/);
+  }
 });
 
 test('Docker는 context endpoint와 서버 OS·아키텍처를 구분하고 endpoint의 비밀 값을 제거한다', async () => {

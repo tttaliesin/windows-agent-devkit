@@ -7,10 +7,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { parse as parseYaml } from 'yaml';
+import { BUNDLE_PATH, bundleOptions } from './lib/bundle.mjs';
 
 export const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const MARKETPLACE_NAME = 'windows-agent-devkit-local';
-const REQUIRED_RUNTIME_SCRIPTS = ['collect-host.ps1', 'collect-advanced.ps1', 'start-owned-session.ps1'];
+const RUNTIME_SCRIPTS = ['collect-advanced.ps1', 'collect-host.ps1', 'start-owned-session.ps1'];
 const DEPENDENCIES = { '@renovatebot/pep440': '6.0.0', semver: '7.8.6', 'smol-toml': '1.9.1', yaml: '2.9.1' };
 const DEV_DEPENDENCIES = { esbuild: '0.28.2' };
 const normalized = (value) => value.replaceAll('\\', '/');
@@ -32,13 +33,16 @@ export async function filesUnder(directory, { optional = false } = {}) {
   return files;
 }
 export function isRuntimeScript(name) {
-  return /^collect-[a-z-]+\.ps1$/.test(name) || name === 'start-owned-session.ps1';
+  return RUNTIME_SCRIPTS.includes(name);
 }
 export async function runtimeScriptFiles(root) {
   const directory = join(root, 'scripts');
-  const files = (await filesUnder(directory)).filter((file) => dirname(file) === directory && isRuntimeScript(basename(file)));
-  for (const name of REQUIRED_RUNTIME_SCRIPTS) assert.ok(files.some((file) => basename(file) === name), `필수 런타임 스크립트 누락: ${name}`);
-  return files;
+  assert.ok((await lstat(directory)).isDirectory(), '런타임 scripts 경로에는 일반 디렉터리가 필요합니다.');
+  const entries = new Map((await readdir(directory, { withFileTypes: true })).map((entry) => [entry.name, entry]));
+  return RUNTIME_SCRIPTS.map((name) => {
+    assert.ok(entries.get(name)?.isFile(), `필수 런타임 스크립트가 일반 파일이어야 합니다: ${name}`);
+    return join(directory, name);
+  });
 }
 export async function verifyDependencies(root = ROOT) {
   const packageData = await json(join(root, 'package.json')), lock = await json(join(root, 'package-lock.json'));
@@ -77,13 +81,6 @@ export async function verifyManifest(root, packageData) {
   return manifest;
 }
 
-// Same output settings as scripts/build.mjs; metafile is verification metadata only.
-// API checked 2026-11-17: https://esbuild.github.io/api/#metafile and #legal-comments.
-export function bundleOptions(root, outfile) {
-  return { absWorkingDir: root, entryPoints: ['src/cli.mjs'], outfile, platform: 'node', target: 'node24', format: 'esm', bundle: true,
-    banner: { js: 'import { createRequire as __devkitCreateRequire } from "node:module"; const require = __devkitCreateRequire(import.meta.url);' },
-    legalComments: 'eof', sourcemap: false, metafile: true };
-}
 export function verifyBundleGraph(metafile, lock) {
   const outputs = Object.values(metafile.outputs);
   assert.equal(outputs.length, 1, '설치 CLI는 단일 번들이어야 합니다.');
@@ -93,6 +90,12 @@ export function verifyBundleGraph(metafile, lock) {
     const record = packages.filter((p) => normalized(input).startsWith(`${p.location}/`)).sort((a, b) => b.location.length - a.location.length)[0];
     assert.ok(record && !record.dev && !record.link, `lock에 없는 패키지 또는 개발 의존성 번들: ${input}`);
   }
+}
+async function verifyBundleMatchesSource(sourceRoot, artifactRoot, lock, message) {
+  const expected = await build({ ...bundleOptions(sourceRoot), write: false });
+  verifyBundleGraph(expected.metafile, lock);
+  const actual = await readFile(join(artifactRoot, BUNDLE_PATH));
+  assert.ok(actual.equals(expected.outputFiles[0].contents), message);
 }
 export async function productionNotices(root, lock) {
   const components = [], notices = ['Windows Agent Devkit: 포함된 프로덕션 패키지와 라이선스 원문\n'];
@@ -175,8 +178,9 @@ export async function smokeBundle(root, version) {
   assert.ok(basename(canonical).startsWith('windows-agent-devkit-bundle-'));
   try {
     const isolated = join(temporary, 'plugin'), fixture = join(temporary, 'project'), state = join(temporary, 'state');
-    await mkdir(join(isolated, 'dist'), { recursive: true }); await mkdir(fixture);
-    await cp(join(root, 'dist', 'cli.mjs'), join(isolated, 'dist', 'cli.mjs'), { dereference: false });
+    const cli = join(isolated, BUNDLE_PATH);
+    await mkdir(dirname(cli), { recursive: true }); await mkdir(fixture);
+    await cp(join(root, BUNDLE_PATH), cli, { dereference: false });
     await mkdir(join(isolated, 'scripts'));
     for (const file of await runtimeScriptFiles(root)) await cp(file, join(isolated, 'scripts', basename(file)));
     for (const file of await filesUnder(join(root, 'data'), { optional: true })) { const target = join(isolated, 'data', relative(join(root, 'data'), file)); await mkdir(dirname(target), { recursive: true }); await cp(file, target); }
@@ -193,7 +197,6 @@ export async function smokeBundle(root, version) {
       '.env': 'PRIVATE_SENTINEL=never-copy-this-value\n',
     };
     for (const [name, content] of Object.entries(declarations)) await writeFile(join(fixture, name), content);
-    const cli = join(isolated, 'dist', 'cli.mjs');
     const observedVersion = await runNode([cli, '--version'], temporary);
     assert.equal(observedVersion.code, 0, '독립 번들 --version 종료 코드'); assert.equal(observedVersion.stdout.trim(), version);
     const help = await runNode([cli, '--help'], temporary);
@@ -237,9 +240,7 @@ export async function checkRepository(root = ROOT) {
   const files = ['README.md', 'AGENTS.md', 'package.json', 'package-lock.json', 'plugin.json'].map((file) => join(root, file));
   for (const directory of ['docs', 'skills', 'src', 'scripts', 'test', '.github/workflows', 'data']) files.push(...await filesUnder(join(root, directory), { optional: directory === 'data' }));
   const text = await verifyTextFiles(root, files, { skills: true }); assert.ok(text.skills > 0, 'Skill이 하나 이상 필요합니다.');
-  const expected = await build({ ...bundleOptions(root, join(root, 'dist', 'cli.mjs')), write: false });
-  verifyBundleGraph(expected.metafile, lock);
-  assert.ok((await readFile(join(root, 'dist', 'cli.mjs'))).equals(Buffer.from(expected.outputFiles[0].contents)), 'dist/cli.mjs가 현재 소스의 빌드와 다릅니다. npm run build를 실행하세요.');
+  await verifyBundleMatchesSource(root, root, lock, 'dist/cli.mjs가 현재 소스의 빌드와 다릅니다. npm run build를 실행하세요.');
   const smoke = await smokeBundle(root, packageData.version);
   return { ...text, smoke };
 }
@@ -249,10 +250,11 @@ export async function verifyPackaged(directory, sourceRoot = ROOT) {
   for (const file of files) {
     const label = normalized(relative(directory, file)), parts = label.split('/');
     assert.ok(!parts.some((p) => ['node_modules', 'src', 'tools', '.git', '.codegraph', 'test'].includes(p)), `설치에 불필요한 파일: ${label}`);
-    if (label.startsWith('scripts/')) assert.ok(isRuntimeScript(label.slice('scripts/'.length)), `허용하지 않은 런타임 스크립트: ${label}`);
   }
   await runtimeScriptFiles(directory);
+  assert.ok((await readdir(join(directory, 'scripts'))).every(isRuntimeScript), '설치 패키지의 scripts에는 지정한 런타임 파일 세 개만 포함해야 합니다.');
   for (const source of await runtimeScriptFiles(sourceRoot)) assert.deepEqual(await readFile(join(directory, 'scripts', basename(source))), await readFile(source), `런타임 스크립트: ${basename(source)}`);
+  await verifyBundleMatchesSource(sourceRoot, directory, lock, '설치 패키지의 dist/cli.mjs가 현재 소스의 빌드와 다릅니다. npm run package를 실행하세요.');
   for (const file of await filesUnder(join(sourceRoot, 'data'), { optional: true })) assert.deepEqual(await readFile(join(directory, 'data', relative(join(sourceRoot, 'data'), file))), await readFile(file), '런타임 data 자산');
   const compatibility = await json(join(directory, '.codex-plugin', 'plugin.json'));
   assert.equal(compatibility.name, manifest.name); assert.equal(compatibility.version, manifest.version); assert.equal(compatibility.skills, './skills/');

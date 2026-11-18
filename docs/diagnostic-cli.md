@@ -1,18 +1,23 @@
 # 진단 CLI 사용법
 
-이 문서는 기존 CLI 계약과 0.3.0에서 추가하는 작업 실행기 사용법을 설명합니다.
-기준일은 2026-11-17입니다.
-0.3.0은 작업 실행기 연동을 포함합니다.
-실제 Windows 호스트와 Codex 앱에서의 확인 상태는 [검증 기록](verification.md)에서 구분합니다.
+이 문서는 설치한 CLI로 환경을 진단하고 선택한 작업을 검증하는 방법을 설명합니다.
+배포 버전과 실제 Windows 호스트·Codex 앱 검증 결과는 [검증 기록](verification.md)에서 확인합니다.
 
 ## 실행 전제조건
 
 Windows 11 x64, Node.js 24 이상과 PowerShell 7을 실행 기준으로 사용합니다.
 진단 CLI의 Node.js 요구와 대상 프로젝트의 런타임 요구는 별도로 비교합니다.
-소스 체크아웃은 `package-lock.json`에 고정한 의존성을 사용합니다.
-설치용 `dist/cli.mjs`에는 실행 의존성 네 개를 포함합니다.
-PowerShell 수집기와 정책 자료는 패키지의 함께 배포되는 파일을 사용합니다.
-빌드와 로컬 패키지 준비 방법은 [구현 구조](implementation-plan.md)에 기록합니다.
+먼저 플러그인을 설치하고 점검할 프로젝트 디렉터리를 준비합니다. [로컬 설치 절차](../README.md#로컬-플러그인-설치)
+`$pluginRoot`에는 설치본의 `skills/environment-doctor/SKILL.md`가 있는 디렉터리에서 두 단계 위의 실제 절대 경로를 넣습니다.
+`$projectRoot`에는 이미 존재하는 대상 프로젝트의 절대 경로를 넣습니다.
+아래 CLI 예시는 모두 같은 설치본의 `dist/cli.mjs`를 호출합니다.
+설치본은 번들에 포함한 의존성과 함께 배포된 PowerShell 파일·정책 자료를 사용합니다.
+
+```powershell
+$pluginRoot = 'C:/path/to/installed/windows-agent-devkit'
+$projectRoot = 'C:/src/example'
+$cli = Join-Path $pluginRoot 'dist/cli.mjs'
+```
 
 ## 명령 선택
 
@@ -26,8 +31,9 @@ PowerShell 수집기와 정책 자료는 패키지의 함께 배포되는 파일
 | `apply --execute --plan <파일>` | 검토한 계획을 적용합니다. | 계획 파일과 명시적인 실행 요청이 필요합니다. |
 | `rollback --execute --journal <ID>` | 해당 저널에서 복구 가능한 자체 파일 변경을 복구합니다. | 기록된 저널 ID와 명시적인 실행 요청이 필요합니다. |
 | `exception --execute --role <역할> --reason <이유>` | 해당 프로젝트와 역할의 유지 예외를 저장합니다. | 명시적인 실행 요청이 필요합니다. |
-| `validate --execute` | 선택한 문맥의 링크·배포판·엔진·서비스 실행을 검증합니다. | 실행 요청과 구체적인 검증 대상이 필요합니다. |
+| `validate --execute` | 선택한 문맥의 링크·배포판·엔진·서비스 또는 개발 작업을 검증합니다. | 실행 요청과 구체적인 검증 대상이 필요합니다. |
 
+실행 대상을 선택하지 않았거나 메타데이터만 확인하려면 `doctor`를 사용합니다.
 `doctor`는 도구 설치, 사용자 프로필 변경, 개발 서비스 기동을 수행하지 않습니다.
 `plan`은 계획과 상태 기록을 만들지만 설치 작업이나 계획의 파일 변경은 적용하지 않습니다.
 설정 적용과 실행 검증은 서로 다른 명령입니다.
@@ -35,8 +41,9 @@ PowerShell 수집기와 정책 자료는 패키지의 함께 배포되는 파일
 ```mermaid
 flowchart LR
     A["doctor: 현재 상태"] --> B["plan: 변경 계획"]
+    A --> D["validate --execute: 선택 문맥 검증"]
     B --> C["apply --execute: 적용"]
-    C --> D["validate --execute: 선택 문맥 검증"]
+    C --> D
     C --> E["rollback --execute: 기록된 변경 복구"]
     B --> F["exception --execute: 역할 유지"]
 ```
@@ -44,12 +51,13 @@ flowchart LR
 ## 기본 점검
 
 ```powershell
-node src/cli.mjs --project .
-node src/cli.mjs doctor --project 'C:/src/example' --format json
-node src/cli.mjs doctor --project . --languages node,python --native
-node src/cli.mjs doctor --project . --wsl --containers --process-compose
-node src/cli.mjs --help
-node src/cli.mjs --version
+node $cli --project $projectRoot
+node $cli doctor --project $projectRoot --format json
+node $cli doctor --project $projectRoot --languages node,python --native
+node $cli doctor --project $projectRoot --wsl --containers --process-compose
+node $cli doctor --project $projectRoot --app --format json
+node $cli --help
+node $cli --version
 ```
 
 `--languages`는 `auto` 또는 `node,python,go,rust,zig,dotnet`의 쉼표 목록을 받습니다.
@@ -74,13 +82,19 @@ includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `un
 
 `--roles`는 쉼표로 구분한 역할 목록입니다.
 `--versions`는 `역할=정확한버전`의 쉼표 목록입니다.
-아래 버전은 입력 형식의 예시이며 권장 최신 버전을 뜻하지 않습니다.
+아래 버전은 입력 형식의 예시입니다.
+`$planFile`에는 새 계획을 저장할 파일 경로를 지정합니다.
 
 ```powershell
 $state = Join-Path $env:LOCALAPPDATA 'WindowsAgentDevkit/state'
 $planFile = Join-Path $state 'review/plan.json'
-node src/cli.mjs plan --project 'C:/src/example' --roles runtime-version-manager --versions node=24.10.0 --state-dir $state --format json --output $planFile
-node src/cli.mjs apply --project 'C:/src/example' --execute --plan $planFile --state-dir $state --format json
+node $cli plan --project $projectRoot --roles runtime-version-manager --versions node=24.10.0 --state-dir $state --format json --output $planFile
+```
+
+저장한 계획에서 적용할 작업을 확인한 뒤 실행합니다.
+
+```powershell
+node $cli apply --project $projectRoot --execute --plan $planFile --state-dir $state --format json
 ```
 
 지원하는 역할은 `runtime-version-manager`, `powershell-profile`, 여섯 언어와 고정된 도구 이름입니다.
@@ -110,8 +124,8 @@ node src/cli.mjs apply --project 'C:/src/example' --execute --plan $planFile --s
 보고서에는 원본 파일과 비밀 값을 포함하지 않습니다.
 
 ```powershell
-node src/cli.mjs rollback --project 'C:/src/example' --execute --journal '<적용 결과의 저널 ID>' --state-dir $state --format json
-node src/cli.mjs exception --project 'C:/src/example' --execute --role runtime-version-manager --reason '프로젝트의 기존 관리자를 유지합니다.' --state-dir $state --format json
+node $cli rollback --project $projectRoot --execute --journal '<적용 결과의 저널 ID>' --state-dir $state --format json
+node $cli exception --project $projectRoot --execute --role runtime-version-manager --reason '프로젝트의 기존 관리자를 유지합니다.' --state-dir $state --format json
 ```
 
 복구는 도구가 기록한 적용 후 해시와 현재 파일이 일치하는 경우에만 수행합니다.
@@ -124,13 +138,17 @@ node src/cli.mjs exception --project 'C:/src/example' --execute --role runtime-v
 ## 선택한 문맥의 실행 검증
 
 ```powershell
-node src/cli.mjs validate --project 'C:/src/example' --execute --distro Ubuntu-24.04 --linux-cwd /home/me/src/example --linux-tools bash --format json
-node src/cli.mjs validate --project 'C:/src/example' --execute --docker-context desktop-linux --image alpine:3.22 --format json
-node src/cli.mjs validate --project 'C:/src/example' --execute --docker-context desktop-linux --compose-file compose.yaml --services api --format json
-node src/cli.mjs validate --project 'C:/src/example' --execute --service-config process-compose.yaml --services api --format json
+node $cli validate --project $projectRoot --execute --rust-targets x86_64-pc-windows-msvc --format json
+node $cli validate --project $projectRoot --execute --distro Ubuntu-24.04 --linux-cwd /home/me/src/example --linux-tools bash --format json
+node $cli validate --project $projectRoot --execute --docker-context desktop-linux --image alpine:3.22 --format json
+node $cli validate --project $projectRoot --execute --docker-context desktop-linux --compose-file compose.yaml --services api --format json
+node $cli validate --project $projectRoot --execute --service-config process-compose.yaml --services api --format json
 ```
 
-WSL 검증은 배포판과 Linux 절대 작업 경로를 함께 선택합니다.
+각 예시의 target·배포판·경로·이미지·설정은 실제로 준비된 검증 대상으로 바꿉니다.
+Rust는 `--rust-targets` 또는 작업 JSON의 `context: "rust"`를 명시한 경우에만 링크 검증을 실행합니다.
+링크 검증은 선택한 target에 임시 소스를 링크해 산출물을 확인합니다.
+WSL 검증에는 기존 배포판 이름과 배포판 내부에 이미 존재하는 Linux 절대 작업 경로를 지정합니다.
 `--linux-tools <쉼표 목록>`으로 배포판 안에서 확인할 도구를 선택할 수 있습니다.
 지원하는 이름은 `bash`, `mise`, `node`, `python3`, `go`, `rustc`, `zig`, `dotnet`입니다.
 생략하면 bash·mise와 적용되는 프로젝트 언어 도구를 선택합니다.
@@ -142,14 +160,13 @@ Docker 검증은 context의 연결 대상과 서버 OS·아키텍처를 구분�
 Compose 검증은 선택한 서비스와 자체 프로젝트 식별자로 범위를 한정합니다.
 Process Compose 검증은 선택한 설정과 서비스의 시작·준비 상태·종료를 구분합니다.
 준비 검사가 없는 서비스는 실행 중이라는 이유만으로 준비 완료로 판정하지 않습니다.
-Rust 검증은 선택한 target에 임시 소스를 링크해 산출물을 확인합니다.
 기존 서비스·이미지·볼륨·프로세스는 정리 대상으로 삼지 않습니다.
 
 `--task-file <파일>`은 명시적으로 선택한 개발 작업을 플러그인 JSON으로 전달합니다.
 Go Task의 Taskfile YAML을 전달하는 옵션이 아닙니다.
 호스트 작업은 `context: "native"`, `trusted: true`, 도구 이름과 문자열 인수 배열을 사용합니다.
 기존 호스트 도구는 `node`, `npm`, `python`, `uv`, `go`, `cargo`, `rustc`, `zig`, `dotnet`, `pwsh`입니다.
-0.3.0은 `mise`, `task`, `just`, `make`를 선택 실행기로 추가합니다.
+`mise`, `task`, `just`, `make`도 선택 실행기로 사용할 수 있습니다.
 아래는 대상 프로젝트에 선언된 mise의 `check` 작업을 선택하는 `task.json` 예시입니다.
 
 ```json
@@ -163,8 +180,11 @@ Go Task의 Taskfile YAML을 전달하는 옵션이 아닙니다.
 }
 ```
 
+검토한 JSON을 `$projectRoot/task.json`에 저장하거나 아래의 `$taskFile`에 실제 파일 경로를 넣습니다.
+
 ```powershell
-node src/cli.mjs validate --project 'C:/src/example' --execute --task-file task.json --format json
+$taskFile = Join-Path $projectRoot 'task.json'
+node $cli validate --project $projectRoot --execute --task-file $taskFile --format json
 ```
 
 | 선택한 기존 명령 | JSON의 `tool` | JSON의 `args` |
@@ -177,18 +197,21 @@ node src/cli.mjs validate --project 'C:/src/example' --execute --task-file task.
 
 실제 프로젝트에 선언된 작업 이름과 인수를 선택합니다.
 설정 구문은 최신 공식 문서와 실제 실행기 버전의 지원 범위를 대조합니다.
-`cwd`를 생략하면 대상 프로젝트의 루트에서 실행합니다.
-선택 항목 `cwd`는 프로젝트 내부의 상대 경로나 절대 경로로 지정할 수 있습니다.
-프로젝트 밖의 경로를 실행 디렉터리로 사용하지 않습니다.
-선택 항목 `env`는 자식 작업에 전달할 환경 변수 이름과 문자열 값의 객체입니다.
+`native`의 `cwd`를 생략하면 대상 프로젝트의 루트에서 실행합니다.
+`native`의 `cwd`에는 프로젝트 내부의 상대 경로나 절대 경로를 지정할 수 있습니다.
+`native`의 `env`는 자식 작업에 전달할 환경 변수 이름과 문자열 값의 객체입니다.
 환경 값과 비밀 값은 보고서에 기록하지 않습니다.
 도구와 인수는 셸 문자열로 합성하지 않습니다.
-`context: "rust"`와 `context: "wsl"`은 해당 문맥의 실행 검증에서 사용합니다.
 작업의 문맥과 명령은 실행 전에 검토해야 합니다.
-작업 파일은 기본 `doctor`에서 실행하지 않습니다.
-호스트 작업의 `status`와 `exitCode`는 별도 `task` 필드에 기록합니다.
 원시 표준 출력과 표준 오류는 작업 보고서에 포함하지 않습니다.
-실제 호스트에서의 기동과 프로젝트 작업 성공 여부는 실행 결과로 별도 확인해야 합니다.
+
+Rust와 WSL의 선택 작업은 각각 `context: "rust"` 또는 `context: "wsl"`과 `trusted: true`를 지정합니다.
+각 작업은 실행할 `tool`과 문자열 `args` 배열을 사용합니다.
+WSL 작업은 `tool`에 선택한 배포판의 Linux 절대 실행 경로를 넣습니다.
+WSL 작업 호출에는 배포판과 Linux 작업 경로를 지정하고 `--task-file`을 함께 전달합니다.
+Rust와 WSL 작업은 해당 문맥의 선행 검증을 통과하면 실행합니다.
+WSL 검증의 선행 단계에서 중단되어 선택 작업이 실행되지 않은 경우에도 `validate --execute`는 종료 코드 1을 반환합니다.
+`context`에 `native`, `rust`, `wsl` 이외의 값을 넣으면 입력 오류로 종료 코드 2를 반환합니다.
 
 플러그인 경유 mise 작업은 도구 자동 설치를 비활성화합니다.
 mise의 일반 기본값은 필요한 도구를 자동 설치할 수 있으므로 플러그인의 실행 제한과 구분합니다. [mise 설정](https://mise.jdx.dev/configuration/settings.html)
@@ -197,7 +220,6 @@ mise의 일반 기본값은 필요한 도구를 자동 설치할 수 있으므�
 mise 자체의 암묵적 신뢰 처리는 설치한 버전과 paranoid 설정을 따릅니다.
 설정 신뢰가 필요한 모드에서 실행이 거부되면 실패 결과를 그대로 보고합니다.
 Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드만으로 실패 원인을 확정하지 않습니다.
-명시한 작업을 실행하지 못해 `unknown`인 `validate --execute`도 종료 코드 1을 반환합니다.
 공유 mise 상태 경로가 샌드박스의 쓰기 범위 밖이면 작업 JSON의 `env.MISE_STATE_DIR`로 선택한 작업용 상태 경로를 지정할 수 있습니다.
 기존 상태 경로의 신뢰 기록은 새 경로로 자동 복사하지 않습니다.
 이 항목의 공식 자료 확인일은 2026-11-17입니다.
@@ -241,7 +263,11 @@ Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드�
 
 `doctor` 보고서는 기존 P0 22개와 P1 8개를 합친 30개 점검 ID를 사용합니다.
 실행 검증을 요청하지 않은 항목은 생략 또는 미확인으로 남습니다.
-`validate`도 30개 점검 보고서에 선택한 실행의 `validation` 근거와 별도 `task` 결과를 포함합니다.
+`validate`도 같은 30개 점검 ID로 보고서를 생성합니다.
+`native` 선택 작업의 상태와 종료 코드는 `report.task`에서 확인합니다.
+Rust 선택 작업의 증거는 `report.validation["RUST-02"].steps`의 `task` 단계에서 확인합니다.
+WSL 선택 작업의 증거는 `report.validation["WSL-02"].steps`의 `task` 단계에서 확인합니다.
+`doctor`나 실행 전 검토에서 선택하지 않은 대상의 `skipped`는 정상입니다.
 실행기의 셸·작업 경로·도구 경로·정적 요구·권장 차이는 SH-01·ENV-02·PATH-01·REQ-01·RCM-01에 연결합니다.
 실행기용 check ID나 필수 hook을 추가하지 않습니다.
 모든 점검 ID가 연결되었다는 사실은 모든 호스트 검증이 완료되었다는 뜻이 아닙니다.
@@ -268,69 +294,10 @@ Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드�
 | 종료 코드 | 의미 |
 | --- | --- |
 | 0 | 확인한 실패 없이 결과를 생성했습니다. |
-| 1 | 보고된 실패나 요구 위반이 있습니다. |
+| 1 | 실패·요구 위반이 있거나 `validate --execute`에서 명시적으로 선택한 검증 항목이 `unknown` 또는 `skipped`입니다. |
 | 2 | 옵션·입력·실행 전제조건 등의 오류가 있습니다. |
 
 ## 개발 검사
 
-```powershell
-node --test
-node scripts/check-package.mjs
-```
-
-테스트는 임시 프로젝트와 주입한 조회 결과로 분석·판정·적용·복구의 동작을 검사합니다.
-문서 링크와 패키지 검사는 실제 Windows 호스트의 전체 검증을 대신하지 않습니다.
-실제 호스트와 앱에서 확인한 범위는 아래 표로 구분합니다.
-
-## 0.2.1의 과거 실행 확인
-
-2026-11-17에 전달된 통합 검증 결과를 기준으로 기록합니다.
-아래 관찰의 대상은 0.2.1과 그 이전 버전입니다.
-이 결과를 0.3.0의 실행기·CI·테스트·앱 검증 완료로 확대하지 않습니다.
-앱의 최초 설치·발견·실제 호출을 확인한 버전은 0.2.0입니다.
-최신 0.2.1의 실제 앱 재호출을 완료했습니다.
-일반 샌드박스의 `use_default` 첫 실행에서 종료 코드 0을 확인했습니다.
-권한 상승은 요청하지 않았습니다.
-
-| 대상 | 확인한 결과 | 남은 검증과 범위 |
-| --- | --- | --- |
-| Windows `doctor` | 실제 호스트에서 30개 ID의 보고서를 생성했습니다. | 30개 항목이 모두 통과했다는 의미는 아닙니다. |
-| Node.js·Python | 실제 실행과 버전 확인에 성공했습니다. | 모든 프로젝트 명령의 성공을 보장하지 않습니다. |
-| Go | PE 실행 파일의 내장 버전 확인에 성공했습니다. | Go 명령을 실행한 버전 조회와는 다른 근거입니다. |
-| 계획·적용·복구 | 통제된 임시 프로젝트에서 plan preview·apply·재적용·rollback·exception이 통과했습니다. | 실제 사용자 프로필과 공유 설치 전체의 검증으로 확대하지 않습니다. |
-| 호스트 개발 작업 | 통제된 임시 npm 프로젝트의 작업이 실제 실행에서 통과했습니다. | 임의 프로젝트의 전체 빌드·테스트 성공과 구분합니다. |
-| 로컬 플러그인 | 최신 앱 호출의 `CODEX-01: pass`에서 설치·활성과 버전 0.2.1을 확인했습니다. | 새 터미널의 수동 설정 선택은 별도 검증입니다. |
-| 앱의 기능 발견과 실제 호출 | Skill 세 개 발견과 최초 0.2.0 호출 이후 최신 0.2.1의 실제 재호출을 완료했습니다. | 일반 샌드박스의 첫 실행에서 권한 상승 없이 종료 코드 0을 확인했습니다. |
-| Process Compose | Windows Job helper로 실제 서비스의 start·readiness·stop이 모두 통과했습니다. | 정리 근거는 `forced: false`, `proof: windows_job_empty`입니다. |
-| WSL 내부 | 기존 Ubuntu-24.04에서 지정 경로와 bash 고정 조회로 `WSL-02: pass`를 확인했습니다. | 전체 언어 도구 설치와 프로젝트 개발 명령 실행은 이 결과에 포함하지 않습니다. |
-| Docker 엔진 | CI와 모의 조회로 동작 경로를 검사했습니다. | 검증할 호스트가 없어 실제 엔진 실행은 미확인입니다. |
-
-앱 화면 스크린샷은 추적하지 않는 `.local/`에 보관합니다.
-Process Compose 정리 근거는 선택한 실서비스와 해당 실행에서 확인한 결과입니다.
-최신 앱 보고서에는 checkId 30개가 있으며 고유 ID도 30개입니다.
-집계는 `pass: 11`, `fail: 0`, `warn: 0`, `unknown: 4`, `skipped: 15`입니다.
-메타데이터 출처는 `context.metadataSource: local-process-and-registry`입니다.
-이 집계는 해당 실행의 관찰이며 다른 PC의 기대값으로 고정하지 않습니다.
-새 터미널의 수동 설정 선택과 셸·프로필 적용은 별도 확인이 남아 있습니다.
-0.2.1에는 CIM 접근 실패 시 로컬 프로세스·레지스트리 메타데이터를 읽는 대체 경로를 반영했습니다.
-일반 샌드박스의 최신 앱 재호출에서 이 대체 경로의 사용을 확인했습니다.
-전달된 소스 테스트 결과는 총 264개 중 통과 261개·실패 0개·생략 3개입니다.
-
-WSL 실측은 아래 명령의 선택 범위에 해당합니다.
-
-```powershell
-node src/cli.mjs validate --project 'F:/workspace/project/tttaliesin/windows-agent-devkit' --execute --distro Ubuntu-24.04 --linux-cwd /mnt/f/workspace/project/tttaliesin/windows-agent-devkit --linux-tools bash --format json
-```
-
-관찰한 OS와 아키텍처는 Linux와 `x86_64`입니다.
-셸은 `/usr/bin/sh`이며 bash는 `/usr/bin/bash`의 5.2.21입니다.
-이미 존재하는 배포판 안에서 고정된 조회만 실행했습니다.
-이 검증을 위해 여섯 언어의 WSL 환경을 설치하지 않았습니다.
-
-## 0.1 구현 이력
-
-0.1.0은 P0 22개 ID의 제한된 정적 분석과 로컬 조회를 제공했습니다.
-당시에는 상위 선언·작업 공간·CI의 의미 분석과 설정 적용을 구현하지 않았습니다.
-P1 8개 ID와 실제 서비스 실행 검증도 후속 범위로 남겼습니다.
-이 설명은 이전 구현 이력입니다.
-0.3.0의 실행기 추가 계약은 위의 선택 실행 절에 기록합니다.
+소스 체크아웃에서 CLI를 개발하는 경우에는 저장소 루트에서 빌드한 뒤 소스 검사와 패키지 생성을 실행합니다. [개발 절차](implementation-plan.md#빌드와-패키지)
+0.2.1 및 이전 버전의 소스·실제 실행 결과는 과거 검증 이력에서 확인합니다. [검증 기록](verification.md)

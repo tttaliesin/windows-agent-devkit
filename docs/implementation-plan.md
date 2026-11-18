@@ -1,8 +1,7 @@
 # CLI 구현 구조와 검증 경계
 
-이 문서는 0.2.1 기반의 구현 구조와 0.3.0에서 추가하는 실행기 계약을 설명합니다.
-기준일은 2026-11-17입니다.
-0.3.0의 통합 테스트·CI·앱 검증은 확인한 실행 근거와 별도로 관리합니다.
+이 문서는 CLI 구현 구조와 패키지 생성 절차를 설명합니다.
+배포 버전과 테스트·CI·실제 Codex 앱 검증 결과는 [검증 기록](verification.md)에서 확인합니다.
 명령 사용법은 [진단 CLI 사용법](diagnostic-cli.md)에 기록합니다.
 모듈 사이의 반환 계약은 [모듈 계약](completion-contract.md)에 기록합니다.
 
@@ -30,7 +29,7 @@ Windows 호스트 조회는 PowerShell 7을 프로필 없이 실행합니다.
 | 모듈 | 현재 책임 |
 | --- | --- |
 | `src/project.mjs` | 선언·상위 적용 경계·작업 공간·CI·가상환경·컨테이너·서비스의 정적 분석입니다. |
-| `src/task-runners.mjs` | 0.3.0에서 추가하는 실행기 파일과 지원 범위 내 작업 선언의 정적 분석입니다. |
+| `src/task-runners.mjs` | 실행기 파일과 지원 범위 내 작업 선언의 정적 분석입니다. |
 | `src/task-runner-checks.mjs` | 실행기 근거를 기존 check ID와 권장 차이에 연결하는 보고 통합입니다. |
 | `src/windows.mjs` | Windows 문맥·명령 후보 수집과 PE 실행 파일 검증입니다. |
 | `src/query.mjs` | 허용한 읽기 전용 조회와 명시적인 실행 작업의 전달입니다. |
@@ -47,6 +46,7 @@ Windows 호스트 조회는 PowerShell 7을 프로필 없이 실행합니다.
 | `src/task.mjs` | 명시적으로 신뢰한 호스트 개발 작업과 별도 `task` 결과입니다. |
 | `src/doctor.mjs` | 30개 점검 ID의 통합 보고입니다. |
 | `src/cli.mjs` | 명령·옵션·출력·명시적인 실행 요청의 처리입니다. |
+| `scripts/lib/bundle.mjs` | 개발 빌드·검사·패키지 생성이 공유하는 CLI 번들 옵션입니다. |
 
 독립적인 읽기 전용 조회와 문맥별 검증은 모듈 안에서 병렬로 수행할 수 있습니다.
 파일 적용과 복구는 상태 잠금과 해시 비교를 거쳐 순서대로 진행합니다.
@@ -84,7 +84,7 @@ devcontainer는 컨테이너 작업 문맥의 근거로 기록합니다.
 보조 DB 서비스의 존재만으로 앱 전체의 컨테이너 실행을 추론하지 않습니다.
 지원하지 않는 외부 포함과 동적 필드는 해당 필드의 구체적인 미확인 사유를 남깁니다.
 
-0.3.0의 실행기 분석은 mise tasks·Taskfile·Justfile·Makefile과 기존 npm scripts의 정적 탐지를 추가합니다.
+실행기 분석은 mise tasks·Taskfile·Justfile·Makefile과 기존 npm scripts를 정적으로 탐지합니다.
 includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `unknown`으로 남깁니다.
 파일 존재와 작업 이름의 발견을 실행 성공으로 취급하지 않습니다.
 실행기의 내부 셸·작업 경로·명령 경로·요구·권장 차이는 SH-01·ENV-02·PATH-01·REQ-01·RCM-01에 연결합니다.
@@ -126,79 +126,59 @@ includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `un
 ## 선택 실행 검증
 
 실행 검증은 `validate --execute`에서 선택합니다.
-Rust 링크 검증은 임시 소스와 실제 산출물로 확인합니다.
-WSL은 선택 배포판의 Linux 작업 경로와 실행 파일을 사용합니다.
+메타데이터를 확인하는 흐름은 `doctor`에서 시작합니다.
+Rust 링크 검증에는 `--rust-targets` 또는 작업 JSON의 `context: "rust"`를 명시합니다.
+Rust 링크의 성공은 임시 소스를 링크한 산출물로 확인합니다.
+WSL은 선택한 배포판의 기존 Linux 작업 경로와 실행 파일을 사용합니다.
 선택적인 `--linux-tools`는 배포판 내부 도구의 조회 범위를 제한합니다.
 Docker는 선택 context의 엔진 조회와 선택 이미지·Compose 서비스 검증을 구분합니다.
 Process Compose는 설정한 서비스의 시작·준비 상태·종료를 구분합니다.
 검증에서 만든 테스트 자원과 자식 세션만 정리합니다.
 대상 프로젝트의 임의 빌드·스크립트는 별도로 선택한 작업일 때만 실행합니다.
 작업 파일의 `context: "native"`는 허용한 호스트 도구와 문자열 인수 배열을 사용합니다.
-`context: "rust"`와 `context: "wsl"`은 해당 실행 검증에서 처리합니다.
 호스트 작업은 `trusted: true`와 `--execute`를 모두 요구합니다.
-호스트 작업의 상태와 종료 코드는 별도 `task` 필드에 기록합니다.
+`native` 작업의 상태와 종료 코드는 `report.task`에 기록합니다.
+Rust·WSL 작업의 근거는 `report.validation`에서 해당 ID의 `steps` 아래 `task` 단계에 기록합니다.
+`validate --execute`에서 명시적으로 선택한 검증 항목이 `unknown` 또는 `skipped`이면 종료 코드는 1입니다.
+작업 JSON에서 지원하지 않는 `context`를 입력하면 종료 코드는 2입니다.
 원시 표준 출력과 표준 오류는 작업 결과에 포함하지 않습니다.
 
-0.3.0의 native 작업 계약은 기존 도구에 `mise`·`task`·`just`·`make`를 추가합니다.
+`native` 작업에는 `mise`·`task`·`just`·`make`를 사용할 수 있습니다.
 `mise run check`는 `tool: "mise"`, `args: ["run", "check"]`로 전달합니다.
-선택 항목 `cwd`는 프로젝트 내부 상대 디렉터리입니다.
+선택 항목 `cwd`는 프로젝트 내부 디렉터리입니다.
 선택 항목 `env`는 자식 작업에 전달할 환경 값의 객체입니다.
 환경 값과 비밀 값은 보고서에 포함하지 않습니다.
 `--task-file`은 플러그인 JSON이며 Go Task의 Taskfile YAML이 아닙니다.
 플러그인 경유 mise 실행은 도구 자동 설치를 비활성화합니다.
 플러그인 작업의 `trusted: true`는 mise 설정 신뢰를 자동 승격하지 않습니다.
-실제 실행 상태와 종료 코드는 기존처럼 별도 `task` 결과로 보고합니다.
 
 ## 빌드와 패키지
 
+저장소 루트에서 다음 명령을 순서대로 실행합니다.
+
 ```powershell
+npm ci --ignore-scripts
+node scripts/build.mjs
 node --test
 node scripts/check-package.mjs
-npm run build
-npm run package
+node scripts/package-plugin.mjs
+node scripts/check-package.mjs --packaged
 ```
 
-번들 출력은 `dist/cli.mjs`입니다.
-로컬 패키지는 `.local/plugin-marketplace` 아래에 생성합니다.
-패키지에는 번들·PowerShell 지원 파일·문서·정책 자료·서드파티 고지를 포함합니다.
-로컬 패키지 생성은 계정 등록이나 공개 게시를 의미하지 않습니다.
+개발 빌드는 저장소의 `dist/cli.mjs`를 생성합니다.
+소스 검사는 빌드 결과와 현재 소스에서 다시 빌드한 바이트를 대조합니다.
+패키지 생성은 `.local/plugin-marketplace/plugins/` 아래의 새 패키지에 `dist/cli.mjs`를 작성합니다.
+`--packaged`는 로컬 마켓플레이스가 가리키는 패키지의 번들을 현재 소스의 메모리 빌드와 바이트 단위로 대조합니다.
+생성한 패키지를 검사한 뒤 마켓플레이스 목록이 가리키는 경로를 교체합니다.
 
-## 0.2.1까지의 확인 이력
+패키지에는 세 Skill·CLI 번들·PowerShell 런타임 자산·문서·정책 자료·서드파티 고지를 포함합니다.
+PowerShell 런타임 자산은 `scripts/collect-host.ps1`, `scripts/collect-advanced.ps1`, `scripts/start-owned-session.ps1`입니다.
+패키지의 `scripts/`에는 이 세 파일만 들어갑니다.
+개발용 빌드·검사·패키지 스크립트는 소스 체크아웃에서 실행합니다.
+설치 절차는 [README](../README.md#로컬-플러그인-설치)에 기록합니다.
 
-아래 관찰은 0.2.1과 그 이전 버전에 한정합니다.
-0.3.0의 실행기 연동·CI·테스트·앱 검증 완료를 의미하지 않습니다.
-
-테스트와 형식·링크 검사는 구현 계약의 근거입니다.
-실제 Windows에서 30개 ID의 doctor 보고서 생성을 확인했습니다.
-Node.js·Python의 실제 실행과 Go PE 내장 버전 확인에 성공했습니다.
-통제된 임시 프로젝트에서 계획 미리보기·적용·재적용·복구·예외 저장과 npm 작업의 실제 실행이 통과했습니다.
-로컬 플러그인 0.2.0의 설치·활성과 앱 화면의 Skill 세 개 발견을 확인했습니다.
-앱 스크린샷은 `.local/`에 보관합니다.
-
-앱의 최초 0.2.0 실제 호출에서 30개 ID 보고서와 `CODEX-01: pass`를 확인했습니다.
-Windows Job helper로 Process Compose 실서비스의 start·readiness·stop이 모두 통과했습니다.
-정리 근거는 `forced: false`와 `proof: windows_job_empty`입니다.
-이 확인 이력의 패키지와 소스 버전은 0.2.1입니다.
-로컬 CIM 접근 실패 시 프로세스·레지스트리 메타데이터를 읽는 대체 경로를 반영했습니다.
-최신 0.2.1의 실제 앱 재호출을 일반 샌드박스의 `use_default`로 완료했습니다.
-첫 실행에서 권한 상승 없이 종료 코드 0을 확인했습니다.
-메타데이터 출처는 `context.metadataSource: local-process-and-registry`입니다.
-보고서의 checkId 30개는 모두 고유합니다.
-결과는 통과 11개·실패 0개·검토 0개·미확인 4개·생략 15개입니다.
-`CODEX-01: pass`에서 설치·활성과 버전 0.2.1을 확인했습니다.
-전달된 소스 테스트는 총 264개 중 261개 통과·0개 실패·3개 생략입니다.
-새 터미널의 수동 설정 선택과 셸·프로필 적용은 별도 검증으로 남깁니다.
-기존 Ubuntu-24.04의 `/mnt/f/workspace/project/tttaliesin/windows-agent-devkit`에서 `--linux-tools bash`로 `WSL-02: pass`를 확인했습니다.
-고정 조회로 Linux·x86_64, `/usr/bin/sh`, `/usr/bin/bash` 5.2.21을 확인했습니다.
-전체 언어 도구의 WSL 설치와 프로젝트 개발 명령 실행을 확인한 결과는 아닙니다.
-Docker 엔진은 검증할 호스트가 없어 CI·모의 조회의 확인 범위에 머뭅니다.
-실제 사용자 프로필과 프로젝트 전체 개발 흐름의 검증도 별도로 남아 있습니다.
-현재 확인 결과는 [검증 기록](verification.md)에서 관리합니다.
-
-## 0.1 구현 이력
+## 이전 구현 이력
 
 0.1.0은 외부 실행 의존성이 없는 첫 읽기 전용 CLI를 대상으로 했습니다.
 P0 22개 ID의 제한된 분석을 제공했고 P1 8개와 설정 적용은 후속 작업이었습니다.
-이전의 무의존성·루트 전용 분석 설명은 당시 범위에만 적용합니다.
-실행·빌드 의존성은 위의 고정 기준을 유지합니다.
-0.3.0의 실행기 추가 계약은 프로젝트 분석과 선택 실행 절에 기록합니다.
+0.2.1 및 이전 버전의 실행 확인은 과거 이력에서 확인합니다. [검증 기록](verification.md)

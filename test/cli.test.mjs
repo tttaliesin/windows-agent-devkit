@@ -33,6 +33,21 @@ test('한국어 텍스트는 미확인과 요구 위반을 구분한다', () => 
   assert.match(text, /\[요구 위반\] PY-01/);
 });
 
+test('텍스트 보고서에서 버전 위반의 선언 근거와 다음 조치를 읽을 수 있다', () => {
+  const text = formatReport({
+    pluginVersion: '0.3.1', project: { root: 'C:/example' }, context: { platform: 'win32' },
+    checks: [{
+      checkId: 'NODE-01', status: 'fail', message: '관찰한 버전이 요구 범위를 벗어납니다.', observed: '26.1.0',
+      requirement: [{ source: 'package.json', field: 'engines.node', kind: 'range', value: '>=24 <25' }],
+      nextAction: '프로젝트가 지정한 버전을 선택합니다.',
+    }],
+    summary: { pass: 0, fail: 1, warn: 0, unknown: 0, skipped: 0 },
+  });
+  assert.match(text, /관찰: 26\.1\.0/);
+  assert.match(text, /요구: >=24 <25 \(package\.json \/ engines\.node\)/);
+  assert.match(text, /다음 조치: 프로젝트가 지정한 버전을 선택합니다\./);
+});
+
 test('잘못된 작업 JSON의 값과 원문은 CLI 오류에 공개하지 않는다', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'windows-agent-invalid-task-'));
   t.after(() => rm(root, { recursive: true, force: true }));

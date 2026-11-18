@@ -1,9 +1,10 @@
 import { build } from 'esbuild';
 import { cp, lstat, mkdir, mkdtemp, realpath, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT, MARKETPLACE_NAME, bundleOptions, filesUnder, inside, productionNotices, runtimeScriptFiles, verifyBundleGraph, verifyDependencies, verifyManifest, verifyPackaged } from './check-package.mjs';
+import { ROOT, MARKETPLACE_NAME, filesUnder, inside, productionNotices, runtimeScriptFiles, verifyDependencies, verifyManifest, verifyPackaged } from './check-package.mjs';
+import { bundleOptions } from './lib/bundle.mjs';
 
 // Fresh versioned releases avoid stale files without deleting installed copies.
 // Publish the marketplace pointer only after verification of the real artifact.
@@ -36,13 +37,13 @@ export async function packagePlugin(root = ROOT) {
   const releases = await directoryWithin(root, join(marketplace, 'plugins'));
   const destination = await mkdtemp(join(releases, `${manifest.name}-${manifest.version}-`));
   if (!inside(await realpath(releases), await realpath(destination))) throw new Error('새 패키지 디렉터리의 범위를 확인하지 못했습니다.');
-  await mkdir(join(destination, 'dist'));
-  const built = await build(bundleOptions(root, join(destination, 'dist', 'cli.mjs')));
-  verifyBundleGraph(built.metafile, lock);
+  const options = bundleOptions(root, destination);
+  await mkdir(dirname(options.outfile));
+  await build(options);
   for (const directory of ['skills', 'docs', 'data']) for (const source of await filesUnder(join(root, directory), { optional: directory === 'data' })) {
     await copyFile(source, join(destination, directory, relative(join(root, directory), source)));
   }
-  for (const source of runtimeScripts) await copyFile(source, join(destination, 'scripts', source.split(/[\\/]/).at(-1)));
+  for (const source of runtimeScripts) await copyFile(source, join(destination, 'scripts', basename(source)));
   await copyFile(join(root, 'README.md'), join(destination, 'README.md'));
   for (const name of ['LICENSE', 'LICENSE.md', 'NOTICE']) {
     try { await lstat(join(root, name)); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }

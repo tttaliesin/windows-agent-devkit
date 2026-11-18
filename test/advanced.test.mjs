@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { collectAdvanced } from '../src/advanced.mjs';
+import { analyzeProject } from '../src/project.mjs';
 
 const IDS = ['TOOLS-01', 'DOTNET-01', 'GIT-01', 'GIT-02', 'IDE-01', 'AUX-01', 'STORE-01'];
 const token = 'private-token-do-not-emit';
@@ -214,25 +215,79 @@ test('.NET runtime-only installations fail SDK requirements and selection denial
 });
 
 test('.NET unsafe sdk.paths and malformed nearest declarations prevent SDK code execution', async (t) => {
-  const f = await fixture(t, { 'global.json': '{"sdk":{"version":"10.0.100","paths":["./untrusted-sdk","$host$"]}}' }); requireLanguage(f, 'dotnet');
+  const f = await fixture(t, { 'global.json': '{"sdk":{"version":"10.0.100","paths":["./untrusted-sdk","$host$"]}}' });
+  f.project = await analyzeProject(f.root);
   let q = sdkRunner(f, ['10.0.100'], '10.0.100');
   assert.equal((await check(f, 'DOTNET-01', q.query)).reason, 'sdk_paths_require_verified_selection');
   assert.equal(q.calls.some((c) => c.tool === 'dotnet' && c.args[0] === '--version'), false);
   q = sdkRunner(f, [], '10.0.100');
   assert.equal((await check(f, 'DOTNET-01', q.query)).reason, 'sdk_paths_require_verified_selection', 'native inventory excludes custom SDK search paths');
+  await writeFile(join(f.root, 'global.json'), '{"sdk":{"version":"10.0.100","paths":[]}}');
+  q = sdkRunner(f, ['10.0.100'], '10.0.100');
+  assert.equal((await check(f, 'DOTNET-01', q.query)).reason, 'sdk_paths_require_verified_selection');
+  assert.ok(!q.calls.some((call) => call.tool === 'dotnet' && call.args[0] === '--version'));
   await writeFile(join(f.root, 'global.json'), '{broken');
   q = sdkRunner(f, ['10.0.100'], '10.0.100');
   assert.equal((await check(f, 'DOTNET-01', q.query)).status, 'unknown');
   assert.equal(q.calls.some((c) => c.tool === 'dotnet' && c.args[0] === '--version'), false);
 });
 
+test('.NET SDK selection checks ancestors outside the static project boundary before running an SDK', async (t) => {
+  const f = await fixture(t, { 'App.csproj': '<Project/>' });
+  await mkdir(join(f.root, '.git'));
+  await writeFile(join(f.directory, 'global.json'), '{"sdk":{"paths":["./unverified-sdk","$host$"]}}');
+  f.project = await analyzeProject(f.root);
+  assert.equal(f.project.metadata.scope.boundaryKind, 'repository');
+  assert.deepEqual(f.project.files, ['App.csproj']);
+
+  const q = sdkRunner(f, ['10.0.100'], '10.0.100');
+  const c = await check(f, 'DOTNET-01', q.query);
+  assert.equal(c.observed.globalJson.ancestor, true);
+  assert.equal(c.reason, 'sdk_paths_require_verified_selection');
+  assert.ok(!q.calls.some((call) => call.tool === 'dotnet' && call.args[0] === '--version'));
+});
+
+test('.NET static analysis and SDK selection reject the same invalid global.json declarations', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, 'global.json'), '{"sdk":{"version":"10.0.100"}}');
+  const cases = [
+    ['escaped duplicate key', '{"sdk":{"version":"10.0.100", /* duplicate */ "\\u0076ersion":"10.0.200"}}'],
+    ['trailing comma', '{"sdk":{"version":"10.0.100", /* invalid */ }}'],
+    ['unterminated comment', '{"sdk":{"version":"10.0.100"}} /*'],
+    ['invalid SDK version', '{"sdk":{"version":"10.0.0100"}}'],
+    ['invalid UTF-8 in a comment', Buffer.concat([Buffer.from('/*'), Buffer.from([0xff]), Buffer.from('*/ {"sdk":{"version":"10.0.100"}}')]), 'unreadable'],
+    ['invalid SDK path', JSON.stringify({ sdk: { version: '10.0.100', paths: [`https://example.invalid/${token}`] } })],
+  ];
+  for (const [name, contents, state = 'unsupported_json_or_sdk_options'] of cases) {
+    await writeFile(join(f.root, 'global.json'), contents);
+    f.project = await analyzeProject(f.root);
+    const q = sdkRunner(f, ['10.0.100', '10.0.200'], '10.0.100');
+    const c = await check(f, 'DOTNET-01', q.query);
+    assert.equal(f.project.requirements.dotnet.state, 'unknown', name);
+    assert.deepEqual(f.project.requirements.dotnet.versionRequests, [], name);
+    assert.equal(c.status, 'unknown', name);
+    assert.equal(c.observed.globalJson.state, state, name);
+    assert.equal(c.observed.globalJson.ancestor, false, name);
+    assert.ok(!q.calls.some((call) => call.tool === 'dotnet' && call.args[0] === '--version'), name);
+    assert.ok(!JSON.stringify([f.project, c]).includes(token), name);
+  }
+});
+
 test('.NET comments, target frameworks and sanitized SDK metadata retain independent meanings', async (t) => {
-  const f = await fixture(t, { 'global.json': '{\n// comment\n"sdk":{"version":"10.0.100", /* band */ "rollForward":"latestPatch"}, "errorMessage":"https://example.invalid/private-token-do-not-emit"\n}' }); requireLanguage(f, 'dotnet');
+  const f = await fixture(t, { 'global.json': '{\n// comment\n"sdk":{"version":"10.0.100", /* band */ "rollForward":"latestPatch"}, "errorMessage":"https://example.invalid/private-token-do-not-emit"\n}' });
+  f.project = await analyzeProject(f.root);
+  const requirement = f.project.requirements.dotnet;
+  assert.equal(requirement.state, 'required');
+  assert.deepEqual(requirement.versionRequests, [{ source: 'global.json', field: 'sdk.version', kind: 'sdk', value: '10.0.100' }]);
   f.project.requirements.dotnet.metadata.targetFrameworks = ['net8.0', 'net48'];
-  let c = await check(f, 'DOTNET-01', sdkRunner(f, ['10.0.100', '10.0.105'], '10.0.105').query);
+  const q = sdkRunner(f, ['10.0.100', '10.0.105'], '10.0.105');
+  let c = await check(f, 'DOTNET-01', q.query);
   assert.equal(c.status, 'pass');
+  assert.equal(c.observed.selectedSdk, '10.0.105');
+  assert.deepEqual(c.observed.globalJson.sdk, requirement.metadata.sdk);
+  assert.ok(q.calls.some((call) => call.tool === 'dotnet' && call.args[0] === '--version'));
   assert.deepEqual(c.observed.targetFrameworks, ['net8.0', 'net48']);
-  assert.doesNotMatch(JSON.stringify(c), new RegExp(token));
+  assert.ok(!JSON.stringify([f.project, c]).includes(token));
   const metadata = await fixture(t); requireLanguage(metadata, 'dotnet');
   metadata.project.requirements.dotnet.metadata.sdk = { version: '10.0.100', rollForward: 'disable', customSecret: token };
   c = await check(metadata, 'DOTNET-01', sdkRunner(metadata, ['10.0.100'], '10.0.100').query);

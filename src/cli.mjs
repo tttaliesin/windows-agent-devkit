@@ -6,9 +6,11 @@ import { parseArgs } from 'node:util';
 import { diagnose, VERSION } from './doctor.mjs';
 import { createPlan, applyPlan, rollbackPlan, saveException } from './configure.mjs';
 import { createQuery } from './query.mjs';
+import { VALIDATION_CHECK_IDS } from './validation.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
 const ACTIONS = ['doctor', 'plan', 'apply', 'rollback', 'exception', 'validate'];
+const TASK_CONTEXTS = ['native', 'rust', 'wsl'];
 const STATUS_LABELS = { pass: '통과', fail: '요구 위반', warn: '검토', unknown: '미확인', skipped: '생략' };
 export const HELP = `Windows Agent Devkit ${VERSION}
 
@@ -42,7 +44,7 @@ export const HELP = `Windows Agent Devkit ${VERSION}
   --image-readiness <exit|running|healthy>  컨테이너 준비 판정 방식
   --compose-file <경로> --services <쉼표 목록>  격리 Compose 검증
   --service-config <경로> --services <쉼표 목록>  Process Compose 검증
-  --rust-targets <쉼표 목록>  설치된 Rust target 점검
+  --rust-targets <쉼표 목록>  실행할 Rust 링크 검사의 target 선택
   --task-file <JSON 파일>   신뢰한 작업의 context·tool·args·trusted·cwd?·env?
                           Go Task의 Taskfile을 받는 옵션이 아닙니다.
 
@@ -53,7 +55,7 @@ export const HELP = `Windows Agent Devkit ${VERSION}
 plan은 개인 상태 디렉터리에 계획을 저장합니다.
 apply·rollback·exception·실행 검증에는 --execute가 필요합니다.
 unknown은 확인되지 않았다는 뜻입니다.
-종료 코드: 0=요구 위반 없음, 1=요구 위반 또는 적용 충돌, 2=실행 오류
+종료 코드: 0=성공, 1=보고된 실패·적용 충돌·선택한 실행 미완료, 2=입력·실행 오류
 `;
 
 function list(value) { return value ? [...new Set(value.split(',').map((i) => i.trim()))] : []; }
@@ -90,6 +92,15 @@ export function formatReport(report) {
     if (check.resolvedPath) lines.push(`  경로: ${check.resolvedPath}`);
     if (typeof check.observed === 'string') lines.push(`  관찰: ${check.observed}`);
     if (check.support?.status && check.support.status !== 'unknown') lines.push(`  공식 지원 계열: ${check.support.status} (${check.support.checkedOn})`);
+    const selectedValidation = check.applicability === 'required' && VALIDATION_CHECK_IDS.includes(check.checkId);
+    if (check.status === 'fail' || check.status === 'warn' || selectedValidation && check.status === 'unknown') {
+      for (const requirement of Array.isArray(check.requirement) ? check.requirement : []) {
+        if (typeof requirement.value !== 'string') continue;
+        const declaration = [requirement.source, requirement.field].filter(Boolean).join(' / ');
+        lines.push(`  요구: ${requirement.value}${declaration ? ` (${declaration})` : ''}`);
+      }
+      if (check.nextAction) lines.push(`  다음 조치: ${check.nextAction}`);
+    }
   }
   if (report.taskRunners) {
     lines.push('', `작업 실행기 권장: mise tasks (${report.taskRunners.recommendation.status})`);
@@ -109,6 +120,13 @@ async function readJson(file) {
   catch { throw new Error('JSON 파일의 구문을 해석하지 못했습니다. 원문은 오류에 포함하지 않습니다.'); }
 }
 
+function hasIncompleteExecution(options, report) {
+  if (options.action !== 'validate' || !options.execute) return false;
+  const incomplete = (status) => status === 'unknown' || status === 'skipped';
+  return incomplete(report.task?.status) || report.checks.some((check) =>
+    VALIDATION_CHECK_IDS.includes(check.checkId) && check.applicability === 'required' && incomplete(check.status));
+}
+
 export async function main(args, { inspect, query } = {}) {
   const options = parseOptions(args);
   if (options.help) { process.stdout.write(HELP); return 0; }
@@ -121,7 +139,10 @@ export async function main(args, { inspect, query } = {}) {
     if (!options.execute) throw new Error('예외 저장에는 --execute가 필요합니다.');
     payload = await saveException(options);
   } else {
-    if (options.taskFile) options.task = await readJson(options.taskFile);
+    if (options.taskFile) {
+      options.task = await readJson(options.taskFile);
+      if (!TASK_CONTEXTS.includes(options.task?.context)) throw new Error('작업 JSON의 context는 native, rust, wsl 중 하나여야 합니다.');
+    }
     payload = await diagnose({ ...options, execute: options.action === 'validate' && options.execute, inspect, query });
   }
   const output = options.format === 'json' || !payload.checks ? JSON.stringify(payload, null, 2) : formatReport(payload);
@@ -130,8 +151,8 @@ export async function main(args, { inspect, query } = {}) {
     await writeFile(options.output, `${output}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   process.stdout.write(`${output}\n`);
-  const unverifiedTask = options.action === 'validate' && options.execute && payload.task?.status === 'unknown';
-  return payload.summary?.fail || payload.task?.status === 'fail' || unverifiedTask || /conflict|failed|partial/.test(payload.status ?? '') ? 1 : 0;
+  const failed = payload.summary?.fail || payload.task?.status === 'fail' || /conflict|failed|partial/.test(payload.status ?? '');
+  return failed || hasIncompleteExecution(options, payload) ? 1 : 0;
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   try { process.exitCode = await main(process.argv.slice(2)); }

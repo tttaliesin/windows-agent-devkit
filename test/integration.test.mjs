@@ -278,6 +278,88 @@ test('CLI는 native 작업 실패를 진단 집계와 별도로 종료 코드 1�
   assert.ok(!JSON.stringify(result.report).includes(SECRET));
 });
 
+test('WSL 호스트 버전만 조회되면 WSL-01은 배포판 확인을 완료하지 않는다', async (t) => {
+  const f = await fixture(t);
+  const version = { state: 'succeeded', exitCode: 0, arguments: ['--version'], version: '2.7.3.0' };
+  const list = { state: 'failed', exitCode: 4294967295, arguments: ['--list', '--verbose'] };
+  f.host.probes.wsl = { ...version, data: { queries: [version, list] } };
+  const options = { ...f.options, wsl: true };
+  const partial = check(await diagnose(options), 'WSL-01');
+  assert.equal(partial.status, 'unknown');
+  assert.equal(partial.reason, 'wsl_host_metadata_incomplete');
+  assert.equal(partial.observed.queries[1].state, 'failed');
+
+  f.host.probes.wsl.data = { distributions: [{ name: 'FixtureLinux', generation: 2 }],
+    queries: [version, { ...list, state: 'succeeded', exitCode: 0 }] };
+  assert.equal(check(await diagnose(options), 'WSL-01').status, 'pass');
+});
+
+test('WSL 사전 조회가 성공해도 선택한 작업을 실행하지 못하면 CLI는 종료 코드 1을 반환한다', async (t) => {
+  const f = await fixture(t, { 'task.json': { context: 'wsl', trusted: true, tool: '/usr/bin/true', args: [] } });
+  const args = ['validate', '--project', f.root, '--state-dir', f.options.stateDir, '--format', 'json',
+    '--task-file', path.join(f.root, 'task.json'), '--distro', 'FixtureLinux', '--linux-cwd', '/workspace', '--linux-tools', 'bash'];
+  const notRun = { state: 'not_run', exitCode: null, stdout: '', stderr: '' };
+  for (const { execute, reply, code, execution, taskCalls } of [
+    { execute: false, reply: notRun, code: 0, execution: 'not_run', taskCalls: 0 },
+    { execute: true, reply: notRun, code: 1, execution: 'not_run', taskCalls: 1 },
+    { execute: true, reply: success(), code: 0, execution: 'succeeded', taskCalls: 1 },
+  ]) {
+    let selectedCalls = 0;
+    const result = await cli(t, execute ? [...args, '--execute'] : args, { inspect: f.options.inspect, query: async (tool, argv, options = {}) => {
+      if (tool !== 'wsl' || !options.execute) return f.options.query(tool, argv, options);
+      if (argv.includes('/bin/sh')) return success('OS=Linux\nARCH=x86_64\nCWD=/workspace\nsh=/usr/bin/sh\nbash=/usr/bin/bash');
+      if (argv.includes('/usr/bin/bash')) return success('GNU bash, version 5.2.21');
+      assert.ok(argv.includes('/usr/bin/true'));
+      selectedCalls += 1;
+      return reply;
+    } });
+    assert.equal(result.code, code);
+    assert.equal(check(result.report, 'WSL-02').execution, execution);
+    assert.equal(selectedCalls, taskCalls);
+    if (execute && code === 1) {
+      assert.equal(check(result.report, 'WSL-02').status, 'unknown');
+      assert.equal(check(result.report, 'WSL-02').reason, 'not_run');
+    }
+  }
+});
+
+test('범위가 빠진 WSL 작업과 알 수 없는 작업 문맥이 조용히 성공하지 않는다', async (t) => {
+  const f = await fixture(t, { 'wsl.json': { context: 'wsl', trusted: true, tool: '/usr/bin/true', args: [] } });
+  const args = ['validate', '--execute', '--project', f.root, '--state-dir', f.options.stateDir, '--format', 'json'];
+  const result = await cli(t, [...args, '--task-file', path.join(f.root, 'wsl.json')], { inspect: f.options.inspect, query: f.options.query });
+  const wsl = check(result.report, 'WSL-02');
+  assert.equal(wsl.applicability, 'required');
+  assert.equal(wsl.execution, 'not_run');
+  assert.equal(result.code, 1);
+  assert.ok(f.calls.every((call) => call.options.execute !== true));
+
+  const file = path.join(f.root, 'invalid.json');
+  await writeFile(file, JSON.stringify({ context: 'wls', trusted: true, tool: '/usr/bin/true', args: [] }));
+  await assert.rejects(main([...args, '--task-file', file], {
+    inspect: async () => assert.fail('호스트를 조회하기 전에 작업 문맥을 검사해야 합니다.'),
+  }), /context는 native, rust, wsl/);
+});
+
+test('Cargo 선언이 있어도 명시한 native 작업만 실행하고 Rust 링크 검사는 생략한다', async (t) => {
+  const f = await fixture(t, { 'Cargo.toml': '[package]\nname = "review-fixture"\nversion = "0.1.0"\n',
+    'task.json': { context: 'native', trusted: true, tool: 'node', args: ['--version'] } });
+  const executable = path.join(f.base, 'rustc.exe');
+  f.host.commands.rustc = [candidate('rustc', executable)];
+  f.host.probes.rustc = { state: 'succeeded', exitCode: 0, version: '1.92.0', executable };
+  const executions = [];
+  const result = await cli(t, ['validate', '--execute', '--project', f.root, '--state-dir', f.options.stateDir,
+    '--format', 'json', '--task-file', path.join(f.root, 'task.json')], { inspect: f.options.inspect, query: async (tool, args, options = {}) => {
+    if (!options.execute) return f.options.query(tool, args, options);
+    executions.push([tool, ...args]);
+    return tool === 'node' ? success() : { state: 'failed', exitCode: 1, stdout: '', stderr: '' };
+  } });
+  assert.deepEqual(executions, [['node', '--version']]);
+  assert.equal(result.report.task.status, 'pass');
+  assert.equal(check(result.report, 'RUST-01').applicability, 'required');
+  assert.equal(check(result.report, 'RUST-02').status, 'skipped');
+  assert.equal(result.code, 0);
+});
+
 test('앱 설치 목록의 installed·available을 구분하고 --app 선택에만 미설치 실패를 반영한다', async (t) => {
   const f = await fixture(t);
   const entry = { name: 'windows-agent-devkit', version: '0.2.0' };

@@ -1,11 +1,9 @@
 # 플러그인의 환경 점검 설계안
 
-기준일은 2026-11-17입니다.
 이 문서는 [권장 Windows 개발환경](windows-environment.md)을 재현 가능한 점검으로 연결합니다.
-0.2.0에서 정한 기존 30개 점검 ID 계약을 0.3.0의 실행기 연동에서도 보존합니다.
-실제 호스트의 검증 범위는 [검증 기록](verification.md)에서 별도로 확인합니다.
-doctor는 30개 ID를 반환합니다.
-기동과 프로젝트 코드 실행은 validate의 명시적인 실행 범위로 구분합니다.
+`doctor`는 기존 30개 check ID를 반환합니다.
+기동과 프로젝트 코드 실행은 `validate --execute`에서 대상을 명시합니다.
+배포 버전과 실제 호스트·앱 검증 범위는 [검증 기록](verification.md)에서 확인합니다.
 
 ## 점검의 입력과 실행 범위
 
@@ -36,7 +34,7 @@ WSL 배포판 기동과 Docker 엔진 기동은 기본 점검에 포함하지 �
 
 ## 작업 실행기 근거의 연결
 
-0.3.0의 실행기 진단은 설정 파일과 해석 가능한 선언의 정적 탐지입니다.
+실행기 진단은 설정 파일과 해석 가능한 선언의 정적 탐지입니다.
 mise tasks·Taskfile·Justfile·Makefile과 기존 npm scripts의 역할을 구분합니다.
 includes·import·동적 변수·템플릿 등 지원하지 않는 표현은 `unknown`으로 남깁니다.
 명령 원문과 환경 값은 보고서에 복사하지 않습니다.
@@ -58,7 +56,6 @@ includes·import·동적 변수·템플릿 등 지원하지 않는 표현은 `un
 플러그인 경유 mise 실행은 자동 설치와 설정 신뢰의 자동 승격을 허용하지 않습니다.
 도구 선택·셸·JSON 예시와 공식 근거는 [작업 실행기 가이드](task-runners.md)에 기록합니다.
 공식 자료 확인일은 2026-11-17입니다.
-이 계약의 기술은 0.3.0의 통합 테스트·CI·앱 검증 완료를 의미하지 않습니다.
 
 ## 첫 구현의 점검 항목
 
@@ -80,7 +77,7 @@ P0는 첫 구현의 대상입니다.
 | NODE-01 | Node.js 요구 | `engines.node`·`.nvmrc`·`.node-version`·`mise.toml`·`.tool-versions`, 확인한 Node의 `--version`·`process.execPath` | 프로젝트 버전 범위와 대조, 앱 번들 런타임과 프로젝트 런타임 구분 |
 | NODE-02 | Node.js 패키지 작업 | `packageManager`·`devEngines`·지침·CI, `package-lock.json`·`npm-shrinkwrap.json`·`pnpm-lock.yaml`·`yarn.lock` | 동일 작업 범위의 선언 충돌 확인, 주요 버전별 의미 구분, 자동 설치 shim 기동 제외 |
 | PY-01 | Python 요구 | `requires-python`·`.python-version`·기존 환경 설정, 확인한 인터프리터의 버전·`sys.executable`·`sys.prefix`·`sys.base_prefix` | 요구 버전과 대조, Store 별칭·설치 관리자와 실제 인터프리터 구분 |
-| PY-02 | Python 의존성 작업 | 기존 환경의 `pyvenv.cfg`, `uv.lock`, requirements·Poetry·Conda 선언 | 환경과 잠금 방식의 일치 확인, 폴더 존재와 정상 실행 구분 |
+| PY-02 | Python 의존성 작업 | 프로젝트의 `pyvenv.cfg`, 선택한 Python의 `sys.prefix`·`sys.base_prefix`, 잠금·관리자 선언 | 현재 프로젝트가 선언한 가상환경 경로와 실제로 선택한 환경을 대조 |
 | GO-01 | Go 요구 | `go.mod`·`go.work`·`go.sum`·`.go-version`·mise 선언, 확인한 Go의 버전·필요 환경 필드 | 최소 Go 요구·선호 도구 모음·무결성 해시 구분, 기본 조회 중 자동 다운로드 제외 |
 | RUST-01 | Rust 요구 | `rust-toolchain.toml`·`rust-toolchain`·`Cargo.toml`·`Cargo.lock`, 설치 목록과 실제 rustc·Cargo 버전·host | 최소 Rust 버전과 정확한 도구 모음 구분, mise·rustup 선택의 일치와 자동 동기화 가능성 확인 |
 | ZIG-01 | Zig 요구 | `.zig-version`·mise 선언·`build.zig.zon`·CI의 버전, 확인한 Zig의 `zig version` | 최소 선언과 고정 버전 구분, 정식·개발 빌드 구분, 기본 점검에서 `build.zig` 실행 제외 |
@@ -98,7 +95,11 @@ Nushell의 Windows 관리 조회가 필요하면 검증된 `pwsh` 보조 프로�
 보조 프로세스를 실행할 수 없으면 해당 조회를 미확인으로 남깁니다.
 Nu와 PowerShell의 PATH 결과를 비교할 때는 작업 경로와 프로필 적용 상태도 함께 기록합니다.
 mise 활성화와 디렉터리 이동 후 갱신 시점은 셸별로 확인합니다.
-가상환경 인터프리터의 실행 가능 여부는 파일 존재와 별도로 확인합니다.
+PY-02는 현재 점검하는 프로젝트 경로를 기준으로 가상환경 선언을 찾습니다.
+Windows 경로를 정규화해 실제 Python의 `sys.prefix`를 프로젝트 가상환경 경로와 대조합니다.
+`sys.base_prefix`와의 차이는 인터프리터가 격리 환경을 선택했는지 판단하는 별도 근거입니다.
+환경 경로의 일치는 선택한 인터프리터에 대한 근거입니다.
+잠금 파일대로 의존성을 설치했는지는 별도 검증 범위입니다.
 버전 범위는 Node.js, Python, .NET의 각 규칙에 맞게 비교해야 합니다.
 모든 버전 표현을 하나의 숫자 비교나 문자열 비교로 처리하지 않습니다.
 프로젝트 요구와 일치하는지와 공급자의 지원 기간 안에 있는지는 별도 판정합니다.
@@ -157,6 +158,12 @@ Zig의 `minimum_zig_version`은 정확한 컴파일러 고정과 구분합니다
 C#의 공식 .NET SDK 설치는 mise 권장 구성의 기록된 예외로 처리합니다.
 mise로 SDK를 공급하는 경우에는 SDK 목록과 실제 선택 결과를 따로 기록합니다.
 공유 설치에서는 `mise.toml`의 선택만으로 .NET SDK를 고정했다고 판정하지 않습니다.
+
+DOTNET-01은 같은 `global.json` 해석 규칙을 프로젝트 분석과 SDK 선택 확인에 적용합니다.
+SDK 후보를 선언의 버전·`rollForward`·`allowPrerelease` 정책과 대조합니다.
+실제로 선택한 SDK는 대상 프로젝트 경로에서 조회한 버전으로 확인합니다.
+잘못된 SDK 설정이나 검증할 수 없는 SDK 탐색 경로는 `unknown`으로 남깁니다.
+2026-11-18에 확인한 .NET 10.0.0 호스트 소스는 `global.json`을 읽을 때 줄 주석과 블록 주석을 허용합니다. [JSON 파서](https://github.com/dotnet/runtime/blob/v10.0.0/src/native/corehost/json_parser.cpp#L43) · [SDK 선택기](https://github.com/dotnet/runtime/blob/v10.0.0/src/native/corehost/fxr/sdk_resolver.cpp#L298)
 
 ## 권장 구성과의 비교
 
@@ -233,7 +240,7 @@ P1은 첫 구현 이후의 확장 대상입니다.
 
 | ID | 적용 조건 | 확인 방법 | 판정의 한계 |
 | --- | --- | --- | --- |
-| RUST-02 | Rust의 Windows 네이티브 링크 요구 | 선택한 host·target, 설치된 대상·구성 요소와 요구되는 MSVC·Windows SDK 메타데이터 | 컴파일러 실행 성공과 링크 가능 여부 구분, MSVC와 GNU 대상의 요구 분리, 실제 빌드는 별도 작업 |
+| RUST-02 | `--rust-targets` 또는 `context: "rust"`로 선택한 Rust 링크 검증 | 선택한 host·target, 설치된 대상·구성 요소와 요구되는 MSVC·Windows SDK 메타데이터 | 컴파일러 실행 성공과 링크 가능 여부 구분, MSVC와 GNU 대상의 요구 분리, 실제 빌드는 별도 작업 |
 | WSL-02 | 지정 배포판의 개발 작업 | 배포판 이름·Linux 작업 경로·셸·Linux용 mise·해당 언어 도구, 요청된 Docker 연계 | 실제 내부 조회는 기동 가능성이 허용된 범위에서 수행, Windows 도구와 Linux 도구 구분 |
 | CTR-02 | 지정 엔진의 연결·실행 검증 | 실제 endpoint의 `docker version` 서버 응답·엔진 OS·아키텍처, 요청된 범위의 이미지·컨테이너 동작 | 원격 대상과 로컬 Desktop 구분, 소켓 활성화 가능성 확인, 연결 실패와 설치 부재 구분 |
 | PC-02 | 요청한 로컬 개발 서비스 실행 | 프로젝트의 Process Compose 설정과 기존 실행 명령, 프로세스 상태·준비 상태·종료 결과 | 시작·재시작·중지 대상의 범위 명시, 포트·의존 관계·정상 종료 확인, 정적 점검과 분리 |
@@ -241,6 +248,12 @@ P1은 첫 구현 이후의 확장 대상입니다.
 | CODEX-01 | Codex 플러그인 사용 | 실행 표면·사용 가능한 셸·파일 기능·권한 오류, 통합 터미널의 셸 선택과 에이전트 실행 환경, 구현 후 매니페스트와 발견·호출 확인 | CLI 부재와 앱 부재 구분, 외부 터미널·통합 터미널·에이전트 셸 구분, 요청한 셸의 기본값 지원은 실제 설정과 새 세션으로 검증 |
 | AUX-01 | 검색 또는 GitHub 작업 | `rg --version`·`gh --version` | 로컬 실행·원격 인증·네트워크 구분, 토큰 조회 제외 |
 | STORE-01 | Dev Drive 검토 | 대상 볼륨의 `Get-Volume`, 해당 볼륨을 지정한 `fsutil devdrv query` | ReFS와 Dev Drive 지정 여부 구분, 권한·지원 옵션 실패는 미확인, 생성·이동 제외 |
+
+실행 대상 없이 메타데이터만 확인할 때는 `doctor`를 사용합니다.
+`doctor`나 실행 전 검토에서 선택하지 않은 대상의 `skipped`는 정상입니다.
+`validate --execute`에서 명시적으로 선택한 검증 항목이 `unknown` 또는 `skipped`이면 CLI는 종료 코드 1을 반환합니다.
+WSL 선택 작업이 선행 검증을 마치지 못해 실행되지 않은 경우에도 이 규칙을 적용합니다.
+Rust·WSL의 작업 결과는 각각 `RUST-02`와 `WSL-02`의 `validation` 근거에서 `task` 단계를 확인합니다.
 
 WSL과 Docker의 조회 명령도 해당 실행 버전에서 부작용을 확인해야 합니다.
 지원하지 않는 조회 옵션의 실패는 기능 부재와 구분합니다.

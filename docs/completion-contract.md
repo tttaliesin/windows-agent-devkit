@@ -1,7 +1,7 @@
-# 0.3.0 모듈 계약
+# 0.3.1 모듈 계약
 
-이 문서는 0.3.0 구현의 모듈 사이 입력과 반환 계약을 기록합니다.
-기준일은 2026-11-17입니다.
+이 문서는 0.3.1의 모듈 사이 입력과 반환 계약을 기록합니다.
+기준일은 2026-11-18입니다.
 실제 호스트와 앱의 검증 상태는 [검증 기록](verification.md)에서 별도로 관리합니다.
 명령 형식은 [진단 CLI 사용법](diagnostic-cli.md)을 따릅니다.
 
@@ -136,6 +136,8 @@ Docker context와 Compose 버전 조회를 엔진 기동·연결 검증과 구�
 `validateEnvironment({projectPath, project, host, options, query})`는 `{checks, evidence}`를 반환합니다.
 담당 ID는 `RUST-02`, `WSL-02`, `CTR-02`, `PC-02`입니다.
 실행에는 `options.execute: true`가 필요합니다.
+Rust 링크 검사는 `rustTargets`, `rustTarget`, `context: "rust"` 중 하나를 명시하면 선택됩니다.
+프로젝트의 Rust 선언은 기본 진단과 이미 선택한 링크 검사의 대상 결정에 사용합니다.
 WSL 대상은 `distro`와 `linuxCwd`입니다.
 선택적인 `linuxTools`는 CLI의 `--linux-tools`에서 도구 이름 배열로 전달합니다.
 지원하는 이름은 `bash`, `mise`, `node`, `python3`, `go`, `rustc`, `zig`, `dotnet`입니다.
@@ -143,6 +145,11 @@ WSL 대상은 `distro`와 `linuxCwd`입니다.
 Docker 대상은 `dockerContext`, 선택적 `image`와 `composeFile`입니다.
 서비스 목록은 `services`이며 Process Compose 설정은 `serviceConfig`입니다.
 선택한 작업은 CLI의 `--task-file`에서 실행 문맥과 도구·인수 배열로 전달합니다.
+`context: "wsl"` 작업을 전달하면 배포판이나 작업 경로가 빠진 경우에도 `WSL-02`는 요청된 검증으로 기록합니다.
+WSL과 Rust의 선택 작업 결과는 해당 ID의 `evidence.steps`에서 `phase: "task"`로 확인합니다.
+앞 단계가 성공해도 선택한 작업이 생략되면 작업의 실행 상태는 `not_run`입니다.
+`validate --execute`에서 선택한 검증이나 작업이 `unknown` 또는 `skipped`이면 종료 코드는 1입니다.
+작업 JSON의 `context`가 허용 범위를 벗어나면 CLI 입력 오류로 종료합니다.
 
 검증은 기동·준비 상태·종료를 구분합니다.
 생성한 테스트 자원과 자식 세션만 정리합니다.
@@ -240,25 +247,7 @@ esbuild는 별도 빌드 의존성입니다.
 설치용 CLI는 실행 의존성을 포함한 Node.js 24 대상의 번들입니다.
 실제 호스트와 Codex 앱의 검증 완료는 모듈 연결이나 단위 테스트의 통과만으로 선언하지 않습니다.
 
-실제 Windows에서 30개 ID의 보고서와 Node.js·Python 실행을 확인했습니다.
-Go 버전의 실호스트 근거는 PE 내장 버전입니다.
-통제된 임시 프로젝트의 계획 미리보기·적용·재적용·복구·예외 저장과 npm 작업은 실제 실행에서 통과했습니다.
-로컬 플러그인 0.2.0은 설치·활성과 앱 화면의 Skill 세 개 발견까지 확인했습니다.
-앱의 최초 0.2.0 실제 호출에서 30개 ID 보고서와 `CODEX-01: pass`를 확인했습니다.
-현재 소스는 0.2.1이며 최신 실제 앱 재호출을 완료했습니다.
-일반 샌드박스의 `use_default` 첫 실행에서 권한 상승 없이 종료 코드 0을 확인했습니다.
-메타데이터 출처는 `context.metadataSource: local-process-and-registry`입니다.
-보고서의 checkId 수와 고유 ID 수는 모두 30개입니다.
-집계는 통과 11개·실패 0개·검토 0개·미확인 4개·생략 15개입니다.
-`CODEX-01: pass`에서 설치·활성과 버전 0.2.1을 확인했습니다.
-이 호출 성공과 새 터미널의 수동 설정·셸 선택 검증은 구분합니다.
-
-Windows Job helper로 Process Compose 실서비스의 start·readiness·stop이 모두 통과했습니다.
-실제 정리 근거는 `forced: false`와 `proof: windows_job_empty`입니다.
-WSL은 기존 Ubuntu-24.04와 지정 Linux 작업 경로에서 `linuxTools: ["bash"]`의 고정 조회로 `WSL-02: pass`를 확인했습니다.
-이 관찰은 전체 언어 도구 설치나 WSL 프로젝트 개발 명령의 성공을 뜻하지 않습니다.
-Docker 엔진은 사용할 검증 호스트가 없어 CI·모의 조회로만 경로를 확인했습니다.
-Docker 엔진을 실제 호스트 검증 완료로 표시하지 않습니다.
+버전별 실제 실행과 앱 설치본의 근거는 [검증 기록](verification.md)에 기록합니다.
 
 ## 이전 계약 이력
 

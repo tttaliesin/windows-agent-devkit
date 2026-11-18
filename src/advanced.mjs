@@ -1,8 +1,10 @@
-import { lstat, open, readdir } from 'node:fs/promises';
+import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
 import semver from 'semver';
+import { readDeclarationFile } from './project/files.mjs';
+import { parseGlobalJson, validateSdkOptions } from './project/global-json.mjs';
 
 // Only the injected, allowlisted query runner executes programs.
 // The runner verifies binaries, bounds output, and isolates dotnet --version's CLI home.
@@ -20,7 +22,6 @@ const ROOTS = ['PATH', 'PATHEXT', 'SystemRoot', 'WINDIR', 'SystemDrive', 'TEMP',
 const DOTNET_ENV = { DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1', DOTNET_GENERATE_ASPNET_CERTIFICATE: '0', DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0', DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: 'true', DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK: '1', DOTNET_SDK_VULNERABILITY_CHECK_DISABLE: 'true', DOTNET_CLI_UI_LANGUAGE: 'en-US' };
 const GIT_ENV = { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_NO_LAZY_FETCH: '1', GIT_LFS_SKIP_SMUDGE: '1', GIT_CONFIG_COUNT: '0' };
 const MISE_ENV = { MISE_OFFLINE: '1', MISE_AUTO_INSTALL: '0', MISE_NO_HOOKS: '1', MISE_NO_ENV: '1', MISE_YES: '0' };
-const POLICY = ['patch', 'feature', 'minor', 'major', 'latestPatch', 'latestFeature', 'latestMinor', 'latestMajor', 'disable'];
 
 function text(value) {
   if (!Buffer.isBuffer(value)) return typeof value === 'string' ? value.replace(/^\uFEFF/, '') : '';
@@ -61,26 +62,6 @@ function failed(id, q, observed = {}, reason) {
 }
 function successful(q) { return q?.state === 'succeeded' && (q.exitCode === 0 || q.exitCode == null); }
 function json(q) { try { return JSON.parse(text(q.stdout)); } catch { return undefined; } }
-function jsonWithComments(source) {
-  let clean = '', quoted = false;
-  for (let i = 0; i < source.length; i++) {
-    const c = source[i];
-    if (quoted) {
-      clean += c;
-      if (c === '\\') clean += source[++i] ?? '';
-      else if (c === '"') quoted = false;
-    } else if (c === '"') { quoted = true; clean += c; }
-    else if (c === '/' && source[i + 1] === '/') {
-      while (i < source.length && source[i] !== '\n') i++;
-      clean += '\n';
-    } else if (c === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2);
-      if (end < 0) throw new SyntaxError('Unterminated JSON comment');
-      i = end + 1; clean += ' ';
-    } else clean += c;
-  }
-  return JSON.parse(clean);
-}
 function dynamic(value) {
   if (typeof value === 'string') return /\{\{|\{%/.test(value);
   return value && typeof value === 'object' && Object.values(value).some(dynamic);
@@ -231,39 +212,25 @@ async function toolsCheck(ctx) {
   return result('TOOLS-01', missing ? 'fail' : different ? 'warn' : unknown ? 'unknown' : 'pass', missing ? 'managed_tool_missing' : different ? 'path_selection_differs' : unknown ? 'selection_not_verified' : 'tool_selection_observed', 'mise의 설치 목록과 현재 PATH의 실제 도구 선택을 대조했습니다.', { observed, resolution: 'resolved', execution: 'succeeded', compatibility: missing || different ? 'violated' : unknown ? 'unknown' : 'satisfied', recommendation: { status: 'aligned', expected: 'mise', exception: '.NET SDK는 공식 설치 경로를 유지합니다.' } });
 }
 
-function sdkOptions(sdk = {}) {
-  if (!sdk || typeof sdk !== 'object' || Array.isArray(sdk)) throw new TypeError('Unsupported SDK options');
-  const options = {};
-  if (sdk.version !== undefined) { if (!VERSION.test(sdk.version) || !semver.valid(sdk.version)) throw new TypeError(); options.version = sdk.version; }
-  if (sdk.rollForward !== undefined) { if (!POLICY.includes(sdk.rollForward) || (!options.version && sdk.rollForward !== 'latestMajor')) throw new TypeError(); options.rollForward = sdk.rollForward; }
-  if (sdk.allowPrerelease !== undefined) { if (typeof sdk.allowPrerelease !== 'boolean') throw new TypeError(); options.allowPrerelease = sdk.allowPrerelease; }
-  if (sdk.paths !== undefined) {
-    if (!Array.isArray(sdk.paths) || sdk.paths.length > 32 || sdk.paths.some((p) => typeof p !== 'string' || !p || /[\x00-\x1f]|:\/\/|[%{}]/.test(p) || (p.includes('$') && p !== '$host$'))) throw new TypeError();
-    options.paths = sdk.paths;
-  }
-  return options;
-}
 async function globalJson(root, fallback) {
+  const physicalRoot = await realpath(root).catch(() => undefined);
+  // The native SDK resolver can see ancestors outside the static analysis boundary.
   for (const directory of ancestors(root)) {
     const file = pathsFor(directory).join(directory, 'global.json');
-    const content = await read(file);
+    const content = await readDeclarationFile(file, { anchor: directory, physicalAnchor: directory === root ? physicalRoot : undefined });
     if (content.state === 'absent') continue;
-    if (content.state !== 'read') return { state: content.state, path: file, ancestor: key(directory) !== key(root) };
+    const location = { path: file, ancestor: key(directory) !== key(root) };
+    if (content.state !== 'read') return { state: content.state, ...location };
     try {
-      const data = jsonWithComments(content.text);
-      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new TypeError();
-      const options = sdkOptions(data?.sdk);
-      return { state: 'read', path: file, ancestor: key(directory) !== key(root), sdk: options };
-    } catch { return { state: 'unsupported_json_or_sdk_options', path: file, ancestor: key(directory) !== key(root) }; }
+      return { state: 'read', ...location, sdk: parseGlobalJson(content.text) ?? {} };
+    } catch { return { state: 'unsupported_json_or_sdk_options', ...location }; }
   }
-  try { return { state: 'absent', path: null, ancestor: false, sdk: sdkOptions(fallback) }; }
+  try { return { state: 'absent', path: null, ancestor: false, sdk: validateSdkOptions(fallback) }; }
   catch { return { state: 'unsupported_json_or_sdk_options', path: null, ancestor: false }; }
 }
 function sdkCandidate(sdks, options) {
   const requested = options.version ? semver.parse(options.version) : null;
-  if (options.version && !requested) return undefined;
   const policy = options.rollForward ?? (requested ? 'patch' : 'latestMajor');
-  if (!POLICY.includes(policy)) return undefined;
   let candidates = sdks.map((i) => i.version).filter((v) => semver.valid(v) && (options.allowPrerelease !== false || !semver.prerelease(v)));
   if (requested) candidates = candidates.filter((v) => {
     const candidate = semver.parse(v), band = Math.floor(candidate.patch / 100), requestedBand = Math.floor(requested.patch / 100);
@@ -307,11 +274,12 @@ async function dotnetCheck({ root, project, host, env, ask }) {
   if (sdkQuery.state === 'not_found') return result('DOTNET-01', 'fail', 'sdk_command_not_resolved', 'C# SDK 요구가 있으나 현재 PATH에서 dotnet 명령을 찾지 못했습니다.', { observed, resolution: 'not_resolved', compatibility: 'violated' });
   if (observed.sdks === null) return failed('DOTNET-01', sdkQuery, observed, successful(sdkQuery) ? 'unsupported_sdk_inventory' : undefined);
   if (!['read', 'absent'].includes(declaration.state)) return failed('DOTNET-01', sdkQuery, observed, declaration.state);
-  if (declaration.sdk.paths?.some((p) => p !== '$host$')) return failed('DOTNET-01', sdkQuery, observed, 'sdk_paths_require_verified_selection');
+  if (declaration.sdk.paths?.length === 0 || declaration.sdk.paths?.some((p) => p !== '$host$')) {
+    return failed('DOTNET-01', sdkQuery, observed, 'sdk_paths_require_verified_selection');
+  }
   if (!observed.sdks.length) return result('DOTNET-01', 'fail', 'sdk_absent', '공유 런타임 목록과 별도로 SDK 설치 목록이 비어 있습니다.', { observed, resolution: 'resolved', execution: 'succeeded', compatibility: 'violated' });
   const expected = sdkCandidate(observed.sdks, declaration.sdk);
   observed.candidateSdk = expected ?? null;
-  if (expected === undefined) return failed('DOTNET-01', sdkQuery, observed, 'unsupported_sdk_policy');
   if (host.capabilities?.dotnetSdkSelection !== false) {
     // The parent runner provides temporary DOTNET_CLI_HOME and clears startup hooks.
     // DOTNET_SKIP_FIRST_TIME_EXPERIENCE is obsolete and is deliberately not used.

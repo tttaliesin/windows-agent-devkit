@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, realpath, lstat, rm, symlink, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { collectInfrastructure } from '../src/infrastructure.mjs';
 import { analyzeProject } from '../src/project.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
@@ -217,6 +218,81 @@ test('불완전한 가상환경은 정상 인터프리터로 판정하지 않는
   assert.equal(project.requirements.python.state, 'required');
   assert.equal(project.metadata.pythonVenv.environments[0].state, 'unknown');
   assert.deepEqual(values(project, 'python'), []);
+  const check = await pythonCheck(project, { prefix: path.join(root, '.venv'), basePrefix: path.join(root, 'python') });
+  assert.equal(check.status, 'unknown');
+  assert.equal(check.reason, 'virtual_environment_metadata_unknown');
+});
+
+async function pythonCheck(project, data, state = 'succeeded') {
+  const host = { probes: { python: { state, data } } };
+  const { checks } = await collectInfrastructure({ project, host, query: () => assert.fail('PY-02는 추가 조회를 실행하지 않습니다.') });
+  return checks.find((check) => check.checkId === 'PY-02');
+}
+
+test('PY-02는 중첩 작업 공간의 현재 루트에 있는 가상환경과 Windows prefix를 비교한다', async (t) => {
+  const root = await fixture(t, {
+    'package.json': { workspaces: ['packages/*'] },
+    '.venv/pyvenv.cfg': 'version = 3.12.8',
+    'packages/app/package.json': {},
+    'packages/app/.venv/pyvenv.cfg': 'version = 3.13.2',
+  });
+  const project = await analyzeProject(path.join(root, 'packages/app'));
+  assert.deepEqual(project.metadata.workspaces[0].members, ['.']);
+  assert.deepEqual(project.requirements.python.metadata.virtualEnvironments.map((entry) => entry.source), ['.venv/pyvenv.cfg']);
+  const windowsProject = process.platform === 'win32' ? project : { ...project, root: 'C:\\Workspace\\packages\\app' };
+  const workspaceRoot = path.win32.resolve(windowsProject.root, '..', '..');
+  const member = path.win32.join(workspaceRoot, 'PACKAGES', 'APP').replaceAll('\\', '/');
+  const basePrefix = 'C:\\Python';
+
+  const match = await pythonCheck(windowsProject, { prefix: member + '/./.VENV/', basePrefix });
+  assert.equal(match.status, 'pass');
+  assert.equal(match.reason, 'project_environment_selected');
+  assert.equal(match.observed.selected.isolated, true);
+
+  for (const prefix of [path.win32.join(workspaceRoot, '.venv'), member + '/.venv-other']) {
+    const other = await pythonCheck(windowsProject, { prefix, basePrefix });
+    assert.equal(other.status, 'warn');
+    assert.equal(other.reason, 'different_virtual_environment_selected');
+    assert.equal(other.compatibility, 'unknown');
+  }
+
+  const base = await pythonCheck(windowsProject, { prefix: 'c:/PYTHON/.', basePrefix });
+  assert.equal(base.status, 'warn');
+  assert.equal(base.reason, 'declared_environment_not_selected');
+  assert.equal(base.observed.selected.isolated, false);
+
+  const conflict = await pythonCheck(windowsProject, { prefix: member + '/.venv', basePrefix: member + '/.VENV/' });
+  assert.equal(conflict.status, 'unknown');
+  assert.equal(conflict.reason, 'project_environment_prefix_conflict');
+
+  const invalid = structuredClone(windowsProject);
+  invalid.requirements.python.metadata.virtualEnvironments[0].directory = '../보안비밀';
+  const invalidCheck = await pythonCheck(invalid, { prefix: member + '/.venv', basePrefix });
+  assert.equal(invalidCheck.status, 'unknown');
+  assert.equal(invalidCheck.reason, 'virtual_environment_metadata_unknown');
+  assert.ok(!JSON.stringify(invalidCheck).includes('보안비밀'));
+});
+
+test('PY-02는 프로젝트 환경 근거가 없는 외부 관리자와 잘못된 관찰을 미확인으로 남긴다', async (t) => {
+  const root = await fixture(t, { 'environment.yml': 'dependencies: [python=3.13]\n' });
+  const project = { ...await analyzeProject(root), root: 'C:/Workspace' };
+  assert.ok(project.requirements.python.packageManagers.some((entry) => entry.name === 'conda'));
+
+  const external = 'C:/Conda/envs/project';
+  for (const [basePrefix, reason] of [['C:/Conda', 'external_virtual_environment_unverified'], [external, 'project_environment_not_observed']]) {
+    const check = await pythonCheck(project, { prefix: external, basePrefix });
+    assert.equal(check.status, 'unknown');
+    assert.equal(check.reason, reason);
+  }
+
+  for (const prefix of ['C:drive-relative', 'https://example.invalid/보안비밀', 42]) {
+    const invalid = await pythonCheck(project, { prefix, basePrefix: 'C:/Conda' });
+    assert.equal(invalid.status, 'unknown');
+    assert.equal(invalid.reason, 'interpreter_environment_path_invalid');
+    assert.equal(invalid.observed.selected, null);
+    assert.ok(!JSON.stringify(invalid).includes('보안비밀'));
+  }
+  assert.equal((await pythonCheck(project, undefined, 'not_run')).reason, 'interpreter_environment_unknown');
 });
 
 test('Process Compose의 셸·경로·의존·상태 검사·포트를 값 평가 없이 수집한다', async (t) => {

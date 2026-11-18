@@ -1,16 +1,14 @@
-import { constants } from 'node:fs';
-import { lstat, open, opendir, realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { parse as parseToml } from 'smol-toml';
 import { parseDocument } from 'yaml';
+import { existingEntry as exists, inside, MAX_BYTES, MAX_DEPTH, MAX_ENTRIES, MAX_FILES, matches, memberOf, portable, projectFileAccess } from './project/files.mjs';
+import { parseGlobalJson } from './project/global-json.mjs';
+import { parseJsonObject, stripJsonComments } from './project/json.mjs';
 import { analyzeTaskRunner, TASK_RUNNER_FILES, taskRunnerInvocation, taskRunnerTool } from './task-runners.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
-const MAX_BYTES = 256 * 1024;
-const MAX_ENTRIES = 4096;
-const MAX_FILES = 128;
-const MAX_DEPTH = 32;
 const UNKNOWN = Symbol('지원하지 않는 정적 표현');
 const has = (object, key) => Object.hasOwn(object, key);
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -62,38 +60,8 @@ function tomlDocument(text) {
 const staticPath = (value) => typeof value === 'string' && value.length > 0 && value.length <= 240 && value.trim() === value &&
   !/[\x00-\x1f\x7f@$%{}?`|&;<>"']|:\/\//.test(value) && !value.replace(/^[A-Za-z]:[\\/]/, '').includes(':');
 const identifier = (value) => typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(value) && !['__proto__', 'constructor', 'prototype'].includes(value);
-const inside = (base, target) => {
-  const relative = path.relative(base, target);
-  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-};
-const portable = (value) => value.split(path.sep).join('/');
 
-// Remove JSONC comments and trailing commas without touching quoted text.
-function jsonc(text) {
-  let clean = '';
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index], pair = text.slice(index, index + 2);
-    if (char === '"') {
-      clean += char;
-      let closed = false;
-      for (index += 1; index < text.length; index += 1) {
-        clean += text[index];
-        if (text[index] === '\\') clean += text[++index] ?? '';
-        else if (text[index] === '"') { closed = true; break; }
-      }
-      if (!closed) throw new Error();
-    } else if (pair === '//') {
-      while (index < text.length && text[index] !== '\n') index += 1;
-      clean += '\n';
-    } else if (pair === '/*') {
-      const end = text.indexOf('*/', index + 2);
-      if (end < 0) throw new Error();
-      clean += ' ';
-      index = end + 1;
-    } else clean += char;
-  }
-  return clean.replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, end) => end ?? match);
-}
+const devcontainerJson = (text) => stripJsonComments(text).replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, end) => end ?? match);
 
 function yamlDocument(text) {
   const document = parseDocument(text, { merge: true, uniqueKeys: true, stringKeys: true, prettyErrors: false });
@@ -210,25 +178,7 @@ export async function analyzeProject(projectPath) {
     }
   };
   const asJson = (text, languages, source) => {
-    try {
-      const value = JSON.parse(text);
-      if (!object(value)) throw new Error();
-      // JSON.parse accepts duplicate keys; keep ambiguous declarations unknown instead of choosing the last one.
-      const stack = [];
-      const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]/g) ?? [];
-      for (let index = 0; index < tokens.length; index += 1) {
-        const token = tokens[index];
-        if (token === '{') stack.push(new Set());
-        else if (token === '[') stack.push(null);
-        else if (token === '}' || token === ']') stack.pop();
-        else if (token.startsWith('"') && tokens[index + 1] === ':') {
-          const key = JSON.parse(token), keys = stack.at(-1);
-          if (!keys || keys.has(key)) throw new Error();
-          keys.add(key);
-        }
-      }
-      return value;
-    } catch {
+    try { return parseJsonObject(text); } catch {
       unknown(languages, source, 'JSON 선언을 객체로 읽을 수 없습니다.');
       return null;
     }
@@ -445,31 +395,13 @@ export async function analyzeProject(projectPath) {
   }
 
   function dotnetDeclaration(text, source) {
-    const data = asJson(text, ['dotnet'], source);
-    if (!data) return;
+    let options;
+    try { options = parseGlobalJson(text); }
+    catch (error) { unknown(['dotnet'], source, error.message); return; }
     note('dotnet', 'SDK 선택과 대상 런타임은 별개이며 분석 경계 안의 가장 가까운 global.json을 사용합니다.');
-    if (!has(data, 'sdk')) return;
-    if (!object(data.sdk)) { unknown(['dotnet'], source, 'sdk 필드의 객체 형식을 확인할 수 없습니다.'); return; }
-    const sdk = data.sdk, options = {};
-    if (has(sdk, 'version')) {
-      request('dotnet', source, 'sdk.version', sdk.version, { kind: 'sdk', validate: (item) => /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(item) });
-      if (typeof sdk.version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(sdk.version)) options.version = sdk.version;
-    }
-    if (has(sdk, 'rollForward')) {
-      const policies = ['patch', 'feature', 'minor', 'major', 'latestPatch', 'latestFeature', 'latestMinor', 'latestMajor', 'disable'];
-      if (!policies.includes(sdk.rollForward) || (!has(sdk, 'version') && sdk.rollForward !== 'latestMajor')) unknown(['dotnet'], source, 'sdk.rollForward 필드의 정책 또는 필수 버전을 확인할 수 없습니다.');
-      else options.rollForward = sdk.rollForward;
-    }
-    if (has(sdk, 'allowPrerelease')) {
-      if (typeof sdk.allowPrerelease !== 'boolean') unknown(['dotnet'], source, 'sdk.allowPrerelease 필드의 불리언 형식을 확인할 수 없습니다.');
-      else options.allowPrerelease = sdk.allowPrerelease;
-    }
-    if (has(sdk, 'paths')) {
-      // Keep local path options, never URLs, credentials or expanded environment values.
-      const safe = (item) => typeof item === 'string' && item.length > 0 && item.length <= 240 &&
-        !/[\x00-\x1f@?{}]|:\/\//.test(item) && (item === '$host$' || !/[$%]/.test(item));
-      if (!Array.isArray(sdk.paths) || sdk.paths.length > 32 || !sdk.paths.every(safe)) unknown(['dotnet'], source, 'sdk.paths 필드에 지원하지 않는 경로 표현이 있습니다.');
-      else options.paths = sdk.paths;
+    if (!options) return;
+    if (options.version) {
+      requirements.dotnet.versionRequests.push({ source, field: 'sdk.version', kind: 'sdk', value: options.version });
     }
     requirements.dotnet.metadata.sdk = options;
   }
@@ -792,7 +724,7 @@ export async function analyzeProject(projectPath) {
     metadata.devcontainer.configurations.push(record);
     if (previous && previous.source !== source) metadata.devcontainer.runtimeLocation = 'unknown';
     let data;
-    try { data = asJson(jsonc(text), [], source); }
+    try { data = asJson(devcontainerJson(text), [], source); }
     catch { issue(source, 'devcontainer JSONC의 주석·문자열을 확인할 수 없습니다.'); }
     if (!data) { uncertain(record, source, 'devcontainer JSONC를 정적 객체로 읽을 수 없습니다.'); return; }
     const modes = ['image', 'build', 'dockerFile', 'dockerComposeFile'].filter((field) => has(data, field));
@@ -914,7 +846,7 @@ export async function analyzeProject(projectPath) {
     }
   }
 
-  let root, physicalRoot;
+  let root;
   try {
     if (typeof projectPath !== 'string' || !projectPath) throw new Error();
     root = path.resolve(projectPath);
@@ -926,16 +858,12 @@ export async function analyzeProject(projectPath) {
     metadata.execution.hostLanguages = Object.fromEntries(LANGUAGES.map((language) => [language, 'unknown']));
     return result;
   }
-  const candidates = new Map(), readCache = new Map(), processed = new Set();
+  const candidates = new Map(), processed = new Set();
   const sourceOf = (filename) => portable(path.relative(root, filename)) || '.';
   const add = (directory, name, spec = description(name), scope = 'project', distance = 0) => {
     const filename = path.join(directory, name), source = sourceOf(filename);
     if (!candidates.has(source)) candidates.set(source, { source, filename, anchor: inside(root, directory) ? root : directory, spec, scope, distance });
     return candidates.get(source);
-  };
-  const exists = async (filename) => {
-    try { return await lstat(filename); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   };
   function fail(item, message) {
     const { spec, source } = item;
@@ -948,84 +876,22 @@ export async function analyzeProject(projectPath) {
     else if (spec.languages?.length) unknown(spec.languages, source, message);
     else issue(source, message);
   }
-  async function safeDirectories(base, directory) {
-    if (!inside(base, directory)) throw new Error();
-    if (base === root) {
-      if (physicalRoot && await realpath(root) !== physicalRoot) throw new Error();
-    } else {
-      const info = await lstat(base);
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error();
-    }
-    let cursor = base;
-    for (const segment of path.relative(base, directory).split(path.sep).filter(Boolean)) {
-      cursor = path.join(cursor, segment);
-      const info = await lstat(cursor);
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error();
-    }
-    return inside(await realpath(base), await realpath(directory));
-  }
-  let reads = 0;
-  async function read(item) {
-    if (readCache.has(item.filename)) {
-      const cached = readCache.get(item.filename);
-      if (cached.error) fail(item, cached.error);
-      return cached.text;
-    }
-    let handle, text = null, error;
-    try {
-      if (++reads > MAX_FILES) throw new Error('선언 파일 수가 정적 분석 한도를 초과했습니다.');
-      if (!await safeDirectories(item.anchor, path.dirname(item.filename))) throw new Error();
-      const before = await lstat(item.filename);
-      if (!before.isFile() || before.isSymbolicLink()) throw new Error('선언 파일이 일반 파일이 아니거나 링크이므로 읽지 않았습니다.');
-      if (!inside(await realpath(item.anchor), await realpath(item.filename))) throw new Error('허용한 선언 경계 밖의 파일은 읽지 않았습니다.');
-      handle = await open(item.filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      const info = await handle.stat();
-      if (!info.isFile() || info.ino !== before.ino || info.dev !== before.dev) throw new Error('조회 중 선언 파일의 대상이 변경되어 읽지 않았습니다.');
-      if (item.spec.parser) {
-        if (info.size > MAX_BYTES) throw new Error('선언 파일이 256 KiB 읽기 한도를 초과했습니다.');
-        const bytes = Buffer.alloc(MAX_BYTES + 1);
-        let length = 0;
-        while (length < bytes.length) {
-          const chunk = await handle.read(bytes, length, bytes.length - length, length);
-          if (!chunk.bytesRead) break;
-          length += chunk.bytesRead;
-        }
-        if (length > MAX_BYTES) throw new Error('선언 파일이 256 KiB 읽기 한도를 초과했습니다.');
-        try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)).replace(/^\uFEFF/, ''); }
-        catch { throw new Error('선언 파일을 UTF-8 텍스트로 읽을 수 없습니다.'); }
-        if (text.includes('\0')) throw new Error('선언 파일에 지원하지 않는 바이너리 데이터가 있습니다.');
-      } else text = '';
-      const after = await handle.stat(), linked = await lstat(item.filename);
-      if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || linked.isSymbolicLink() || linked.ino !== info.ino || linked.dev !== info.dev || !await safeDirectories(item.anchor, path.dirname(item.filename)) || !inside(await realpath(item.anchor), await realpath(item.filename))) {
-        throw new Error('조회 중 선언 파일이나 폴더가 변경되어 요구를 확정하지 않았습니다.');
-      }
-    } catch (caught) {
-      error = /^선언 |^조회 |^허용한 /.test(caught.message) ? caught.message : '선언 파일의 폴더 링크·접근 권한·대상을 안전하게 확인할 수 없습니다.';
-      text = null;
-      fail(item, error);
-    } finally { if (handle) await handle.close().catch(() => {}); }
-    readCache.set(item.filename, { text, error });
-    return text;
-  }
-  async function list(directory, base = root) {
-    if (!await safeDirectories(base, directory)) throw new Error();
-    const entries = [];
-    for await (const entry of await opendir(directory)) {
-      if (entries.length >= MAX_ENTRIES) throw new Error('디렉터리 항목 수가 정적 탐색 한도를 초과했습니다.');
-      entries.push(entry);
-    }
-    return entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  }
-  let rootEntries;
+  let fileAccess, rootEntries;
   try {
-    physicalRoot = await realpath(root);
-    rootEntries = await list(root);
+    fileAccess = projectFileAccess(root, await realpath(root));
+    rootEntries = await fileAccess.list(root);
   } catch {
     unknown(LANGUAGES, '.', '프로젝트 루트의 선언 파일 목록을 읽을 수 없거나 탐색 한도를 초과했습니다.');
     result.environment = { containers: 'unknown', processCompose: 'unknown' };
     metadata.execution.location = 'unknown';
     metadata.execution.hostLanguages = Object.fromEntries(LANGUAGES.map((language) => [language, 'unknown']));
     return result;
+  }
+  const { list, safeDirectories } = fileAccess;
+  async function read(item) {
+    const { text, error } = await fileAccess.read(item);
+    if (error) fail(item, error);
+    return text;
   }
   for (const entry of rootEntries) if (description(entry.name)) add(root, entry.name);
   for (const [folder, filename, spec] of [
@@ -1046,23 +912,6 @@ export async function analyzeProject(projectPath) {
     } catch { fail({ source: folder, spec }, '설정 폴더의 링크 또는 비표준 항목은 따라가지 않습니다.'); }
   }
 
-  function matches(pattern, value) {
-    const pieces = pattern.replace(/^!/, '').replace(/^\.\//, '').replace(/\/$/, '').split('/');
-    const parts = value.split('/');
-    const memo = new Map();
-    function match(left, right) {
-      const key = `${left}:${right}`;
-      if (memo.has(key)) return memo.get(key);
-      let yes;
-      if (left === pieces.length) yes = right === parts.length;
-      else if (pieces[left] === '**') yes = match(left + 1, right) || (right < parts.length && match(left, right + 1));
-      else yes = right < parts.length && new RegExp(`^${pieces[left].split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')}$`).test(parts[right]) && match(left + 1, right + 1);
-      memo.set(key, yes);
-      return yes;
-    }
-    return match(0, 0);
-  }
-  const memberOf = (patterns, value) => Array.isArray(patterns) && patterns.some((pattern) => typeof pattern === 'string' && !pattern.startsWith('!') && matches(pattern, value)) && !patterns.some((pattern) => typeof pattern === 'string' && pattern.startsWith('!') && matches(pattern, value));
   const inherited = ['global.json', '.node-version', '.python-version', '.tool-versions', '.mise.toml', 'mise.toml'];
   let boundary = root;
   try {

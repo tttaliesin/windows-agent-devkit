@@ -13,12 +13,18 @@ import { checkApp } from './app-check.mjs';
 import { runProjectTask } from './task.mjs';
 import { summarizeTaskRunners, collectTaskRunnerTools, attachTaskRunnerChecks } from './task-runner-checks.mjs';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.3.1';
 export const P0_IDS = ['ENV-01', 'ENV-02', 'SH-01', 'PATH-01', 'REQ-01', 'PKG-01', 'GIT-01', 'GIT-02', 'NODE-01', 'NODE-02', 'PY-01', 'PY-02', 'GO-01', 'RUST-01', 'ZIG-01', 'DOTNET-01', 'TOOLS-01', 'WSL-01', 'CTR-01', 'LD-01', 'PC-01', 'RCM-01'];
 export const P1_IDS = ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02', 'IDE-01', 'CODEX-01', 'AUX-01', 'STORE-01'];
 const LANGUAGE_TOOLS = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
 const LANGUAGE_CHECKS = { node: 'NODE-01', python: 'PY-01', go: 'GO-01', rust: 'RUST-01', zig: 'ZIG-01', dotnet: 'DOTNET-01' };
 const LABELS = { node: 'Node.js', python: 'Python', go: 'Go', rust: 'Rust', zig: 'Zig', dotnet: '.NET SDK' };
+
+function summarizeChecks(checks) {
+  const summary = { pass: 0, fail: 0, warn: 0, unknown: 0, skipped: 0 };
+  for (const check of checks) summary[check.status] += 1;
+  return summary;
+}
 
 function result(checkId, status, reason, message, extra = {}) {
   return {
@@ -150,7 +156,7 @@ export function buildReport(project, host, options = {}) {
     nextAction: '미확인한 설치 이력과 활성화를 확인해 전환안을 구체화합니다. 이 진단은 전환을 적용하지 않습니다.',
   }));
   checks.sort((left, right) => P0_IDS.indexOf(left.checkId) - P0_IDS.indexOf(right.checkId));
-  const summary = Object.fromEntries(['pass', 'fail', 'warn', 'unknown', 'skipped'].map((status) => [status, checks.filter((check) => check.status === status).length]));
+  const summary = summarizeChecks(checks);
   return { schemaVersion: 1, pluginVersion: VERSION, policyVersion: '2026-11-17', generatedAt: new Date().toISOString(), context: host.context, project: { root: project.root, files: project.files }, summary, checks, deferredChecks: P1_IDS, limitations: ['공식 지원 상태는 자동 조회하지 않아 unknown으로 기록합니다.', '지원하지 않는 선언과 버전 표현은 unknown으로 기록합니다.', '진단 셸의 관찰을 사용자 프로필이나 앱 터미널의 관찰로 일반화하지 않습니다.', '이 보고서는 전체 빌드·테스트와 앱에서의 플러그인 로딩 검증을 대신하지 않습니다.'] };
 }
 
@@ -180,7 +186,6 @@ export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], 
   const ids = [...P0_IDS, ...P1_IDS];
   report.checks = ids.map((id) => map.get(id));
   attachSupport(report.checks, host, options.now);
-  report.summary = Object.fromEntries(['pass', 'fail', 'warn', 'unknown', 'skipped'].map((status) => [status, report.checks.filter((check) => check.status === status).length]));
   report.deferredChecks = [];
   report.project.scope = project.metadata?.scope;
   report.project.execution = project.metadata?.execution;
@@ -195,12 +200,10 @@ export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], 
   recommendation.observed = recommendation.observed.filter((i) => i.role !== '개발 도구 관리');
   if (map.get('TOOLS-01').status !== 'skipped') recommendation.observed.push({ role: '개발 도구 관리', expected: 'mise', observed: map.get('TOOLS-01').observed?.version ?? null, status: map.get('TOOLS-01').recommendation.status });
   recommendation.observed.push({ role: '터미널', expected: 'Windows Terminal', observed: candidates(host, 'wt'), status: discovered(host, 'wt') ? 'aligned' : 'unknown' });
-  recommendation.recommendation.status = recommendation.observed.some((i) => i.status === 'different') ? 'different' : recommendation.observed.some((i) => i.status === 'unknown') ? 'unknown' : 'aligned';
-  recommendation.status = recommendation.recommendation.status === 'different' ? 'warn' : recommendation.recommendation.status === 'unknown' ? 'unknown' : 'pass';
   recommendation.exceptions = report.exceptions;
   taskRunners.tools = runnerTools;
   attachTaskRunnerChecks(report, taskRunners);
-  report.summary = Object.fromEntries(['pass', 'fail', 'warn', 'unknown', 'skipped'].map((status) => [status, report.checks.filter((check) => check.status === status).length]));
+  report.summary = summarizeChecks(report.checks);
   report.limitations = ['지원 정책은 2026-11-17의 오프라인 스냅샷이며 30일 후에는 미확인으로 처리합니다.', '지원 계열 판정은 최신 패치·취약점·모든 OS 지원 조합의 확인을 포함하지 않습니다.', '기본 진단은 프로젝트 명령·배포판 내부·컨테이너·서비스를 실행하지 않습니다.', '앱 설치 목록과 실제 Skill 호출의 관찰은 구분합니다.'];
   return report;
 }
