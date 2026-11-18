@@ -46,7 +46,8 @@ async function fixture(action) {
     return await action(directory, { cwd: directory, pwshPath, timeoutMs: 5000, startupTimeoutMs: 10000 });
   } finally {
     assert.ok(path.basename(directory).startsWith('job-session-test-'));
-    await rm(directory, { recursive: true, force: true });
+    // Retry transient file locks during Windows fixture removal.
+    await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   }
 }
 
