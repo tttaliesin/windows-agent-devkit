@@ -7,14 +7,22 @@ import { diagnose, VERSION } from './doctor.mjs';
 import { createPlan, applyPlan, rollbackPlan, saveException } from './configure.mjs';
 import { createQuery } from './query.mjs';
 import { VALIDATION_CHECK_IDS } from './validation.mjs';
+import { previewWslRegistration, registerWslTask, listWslTasks, unregisterWslTask } from './wsl-registrations.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
-const ACTIONS = ['doctor', 'plan', 'apply', 'rollback', 'exception', 'validate'];
+const WSL_REGISTRATION_OPTIONS = {
+  'wsl-register': ['task-name', 'distro', 'linux-cwd', 'task-file', 'execute', 'confirm'],
+  'wsl-tasks': [],
+  'wsl-unregister': ['task-name', 'execute'],
+};
+const ACTIONS = ['doctor', 'plan', 'apply', 'rollback', 'exception', 'validate', ...Object.keys(WSL_REGISTRATION_OPTIONS)];
 const TASK_CONTEXTS = ['native', 'rust', 'wsl'];
 const STATUS_LABELS = { pass: '통과', fail: '요구 위반', warn: '검토', unknown: '미확인', skipped: '생략' };
 export const HELP = `Windows Agent Devkit ${VERSION}
 
-사용법: node dist/cli.mjs [doctor|plan|apply|rollback|exception|validate] [옵션]
+사용법: node dist/cli.mjs [명령] [옵션]
+
+명령: doctor, plan, apply, rollback, exception, validate, wsl-register, wsl-tasks, wsl-unregister
 
   --project <경로>          프로젝트 디렉터리, 기본값 현재 경로
   --format <text|json>      출력 형식, 기본값 text
@@ -48,6 +56,12 @@ export const HELP = `Windows Agent Devkit ${VERSION}
   --task-file <JSON 파일>   신뢰한 작업의 context·tool·args·trusted·cwd?·env?
                           Go Task의 Taskfile을 받는 옵션이 아닙니다.
 
+프로젝트별 WSL 작업 등록:
+  wsl-register --task-name <이름> --distro <배포판> --linux-cwd <Linux 절대 경로> --task-file <JSON 파일>
+  위 명령에 --execute --confirm <반환한 confirmation 값>을 추가하여 등록
+  wsl-tasks                이 프로젝트의 등록 작업과 전용 실행 경로 확인
+  wsl-unregister --task-name <이름> --execute
+
   --help / -h              도움말
   --version                CLI 버전
 
@@ -63,12 +77,25 @@ export function parseOptions(args) {
   const tokens = [...args];
   const action = tokens[0] && !tokens[0].startsWith('-') ? tokens.shift() : 'doctor';
   if (!ACTIONS.includes(action)) throw new Error('지원하지 않는 명령입니다.');
-  const strings = ['project', 'languages', 'timeout-ms', 'output', 'roles', 'versions', 'profile', 'state-dir', 'plan', 'journal', 'role', 'reason', 'scope', 'distro', 'linux-cwd', 'linux-tools', 'docker-context', 'image', 'image-readiness', 'compose-file', 'service-config', 'services', 'rust-targets', 'task-file', 'storage', 'codex-executable'];
+  const strings = ['project', 'languages', 'timeout-ms', 'output', 'roles', 'versions', 'profile', 'state-dir', 'plan', 'journal', 'role', 'reason', 'scope', 'distro', 'linux-cwd', 'linux-tools', 'docker-context', 'image', 'image-readiness', 'compose-file', 'service-config', 'services', 'rust-targets', 'task-file', 'storage', 'codex-executable', 'task-name', 'confirm'];
   const booleans = ['wsl', 'containers', 'process-compose', 'native', 'execute', 'app', 'ide', 'github-auth', 'version'];
   const schema = Object.fromEntries([...strings.map((key) => [key, { type: 'string' }]), ...booleans.map((key) => [key, { type: 'boolean', default: false }])]);
   schema.format = { type: 'string', default: 'text' }; schema.help = { type: 'boolean', short: 'h' };
-  const { values: v } = parseArgs({ args: tokens, allowPositionals: false, strict: true, options: schema });
+  const { values: v, tokens: parsed } = parseArgs({ args: tokens, allowPositionals: false, strict: true, options: schema, tokens: true });
   if (!['text', 'json'].includes(v.format)) throw new Error('--format은 text 또는 json이어야 합니다.');
+  if (Object.hasOwn(WSL_REGISTRATION_OPTIONS, action)) {
+    const allowed = new Set(['project', 'format', 'help', 'version', ...WSL_REGISTRATION_OPTIONS[action]]);
+    for (const option of parsed) {
+      if (!allowed.delete(option.name)) throw new Error(`${action}에서 중복되었거나 지원하지 않는 옵션입니다: ${option.rawName}`);
+    }
+    if (v.confirm !== undefined && !v.execute) throw new Error('--confirm은 --execute와 함께 사용하세요.');
+    return {
+      action, projectPath: resolve(v.project ?? process.cwd()), format: v.format, help: v.help, version: v.version,
+      name: v['task-name'], distro: v.distro, linuxCwd: v['linux-cwd'], execute: v.execute, confirm: v.confirm,
+      taskFile: v['task-file'] === undefined ? undefined : resolve(v['task-file']),
+    };
+  }
+  if (v['task-name'] !== undefined || v.confirm !== undefined) throw new Error('WSL 등록 관련 옵션은 wsl-register 또는 wsl-unregister에서 사용하세요.');
   const languages = !v.languages || v.languages === 'auto' ? [] : list(v.languages);
   if (languages.some((i) => !LANGUAGES.includes(i))) throw new Error('--languages에 지원하지 않는 계열이 있습니다.');
   const timeout = v['timeout-ms'] ?? '5000';
@@ -132,7 +159,12 @@ export async function main(args, { inspect, query } = {}) {
   if (options.help) { process.stdout.write(HELP); return 0; }
   if (options.version) { process.stdout.write(`${VERSION}\n`); return 0; }
   let payload;
-  if (options.action === 'plan') payload = await createPlan(options);
+  if (options.action === 'wsl-register') {
+    const request = { ...options, version: VERSION };
+    payload = await (options.execute ? registerWslTask(request) : previewWslRegistration(request));
+  } else if (options.action === 'wsl-tasks') payload = await listWslTasks(options);
+  else if (options.action === 'wsl-unregister') payload = await unregisterWslTask(options);
+  else if (options.action === 'plan') payload = await createPlan(options);
   else if (options.action === 'apply') payload = await applyPlan({ ...options, plan: await readJson(options.planFile), query: query ?? createQuery(options) });
   else if (options.action === 'rollback') payload = await rollbackPlan({ ...options, id: options.journal });
   else if (options.action === 'exception') {
@@ -151,7 +183,8 @@ export async function main(args, { inspect, query } = {}) {
     await writeFile(options.output, `${output}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   process.stdout.write(`${output}\n`);
-  const failed = payload.summary?.fail || payload.task?.status === 'fail' || /conflict|failed|partial/.test(payload.status ?? '');
+  const failed = payload.summary?.fail || payload.task?.status === 'fail' || /conflict|failed|partial/.test(payload.status ?? '')
+    || (options.action === 'wsl-unregister' && payload.state === 'conflict');
   return failed || hasIncompleteExecution(options, payload) ? 1 : 0;
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
