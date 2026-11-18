@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -25,8 +26,13 @@ type filePin struct {
 	Hash string
 }
 
+type dispatcherBinding struct {
+	Registry string `json:"registry"`
+}
+
 type launcherBinding struct {
 	Project     string
+	Dispatcher  *dispatcherBinding `json:"dispatcher,omitempty"`
 	Fixture     string
 	State       string
 	Lease       filePin
@@ -83,9 +89,21 @@ type receipt struct {
 	Verified    bool           `json:"verified"`
 }
 
+type taskDescriptor struct {
+	SchemaVersion int
+	Name          string
+	Size          int64
+	Hash          string
+}
+
+const windowsPathPrefix = `\\?\`
+
 var (
 	errChanged       = errors.New("pinned input changed")
 	getFinalPathName = syscall.NewLazyDLL("kernel32.dll").NewProc("GetFinalPathNameByHandleW")
+	taskIDPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	taskNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	taskHashPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Resolve the open handle directly, including files in WindowsApps packages
@@ -96,11 +114,11 @@ func canonicalPath(file *os.File, expected string) bool {
 	if n == 0 || n >= uintptr(len(path)) {
 		return false
 	}
-	resolved, ok := strings.CutPrefix(syscall.UTF16ToString(path[:n]), `\\?\`)
+	resolved, ok := strings.CutPrefix(syscall.UTF16ToString(path[:n]), windowsPathPrefix)
 	return ok && strings.EqualFold(resolved, expected)
 }
 
-func projectCwd(project string) bool {
+func projectCwd(project string, pinned os.FileInfo) bool {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return false
@@ -110,11 +128,17 @@ func projectCwd(project string) bool {
 		return false
 	}
 	defer dir.Close()
+	if pinned != nil {
+		info, err := dir.Stat()
+		if err != nil || !os.SameFile(info, pinned) {
+			return false
+		}
+	}
 	return canonicalPath(dir, project)
 }
 
 func openPinned(path string, share, flags uint32) (*os.File, os.FileInfo, error) {
-	name, err := syscall.UTF16PtrFromString(`\\?\` + filepath.Clean(path))
+	name, err := syscall.UTF16PtrFromString(windowsPathPrefix + filepath.Clean(path))
 	if err != nil {
 		return nil, nil, errChanged
 	}
@@ -149,18 +173,23 @@ func lockDir(path string, empty bool) (*os.File, error) {
 	return nil, errChanged
 }
 
+func matchesPin(file *os.File, info os.FileInfo, size int64, expectedHash string) bool {
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return false
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, size+1))
+	return err == nil && n == size && hex.EncodeToString(hash.Sum(nil)) == expectedHash
+}
+
 // Keep verified installation inputs read-only while the validation process uses them.
 func lockPin(pin filePin) (*os.File, error) {
 	file, info, err := openPinned(pin.Path, syscall.FILE_SHARE_READ, 0)
 	if err != nil {
 		return nil, err
 	}
-	if info.Mode().IsRegular() && info.Size() == pin.Size {
-		hash := sha256.New()
-		n, hashErr := io.Copy(hash, io.LimitReader(file, pin.Size+1))
-		if hashErr == nil && n == pin.Size && hex.EncodeToString(hash.Sum(nil)) == pin.Hash {
-			return file, nil
-		}
+	if matchesPin(file, info, pin.Size, pin.Hash) {
+		return file, nil
 	}
 	file.Close()
 	return nil, errChanged
@@ -172,6 +201,167 @@ func liveLease(pin filePin) bool {
 		return false
 	}
 	return file.Close() == nil
+}
+
+// Deny writes and deletes while checking dispatcher inputs and starting the child.
+func openPlain(path string, directory bool) (*os.File, os.FileInfo, error) {
+	var flags uint32
+	if directory {
+		flags = syscall.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	file, info, err := openPinned(path, syscall.FILE_SHARE_READ, flags)
+	if err != nil {
+		return nil, nil, err
+	}
+	var metadata syscall.ByHandleFileInformation
+	err = syscall.GetFileInformationByHandle(syscall.Handle(file.Fd()), &metadata)
+	plain := info.Mode().IsRegular() && metadata.NumberOfLinks == 1
+	if directory {
+		plain = info.IsDir()
+	}
+	if err == nil && plain && metadata.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return file, info, nil
+	}
+	file.Close()
+	return nil, nil, errChanged
+}
+
+func readTaskDescriptor(file *os.File) (taskDescriptor, bool) {
+	const limit = 4096
+	var descriptor taskDescriptor
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || len(data) > limit {
+		return descriptor, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return descriptor, false
+	}
+	// Require the exact field names, each present exactly once.
+	fields := map[string]any{
+		"schemaVersion": &descriptor.SchemaVersion,
+		"name":          &descriptor.Name,
+		"size":          &descriptor.Size,
+		"hash":          &descriptor.Hash,
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		name, _ := key.(string)
+		field := fields[name]
+		if err != nil || field == nil || decoder.Decode(field) != nil {
+			return descriptor, false
+		}
+		delete(fields, name)
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || len(fields) != 0 {
+		return descriptor, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return descriptor, false
+	}
+	return descriptor, descriptor.SchemaVersion == 1 && taskNamePattern.MatchString(descriptor.Name) &&
+		descriptor.Size > 0 && descriptor.Size <= 32*1024*1024 && taskHashPattern.MatchString(descriptor.Hash)
+}
+
+func lockTaskLease(registry, generation, name, id string) (*os.File, error) {
+	key := filepath.Base(registry)
+	if !taskHashPattern.MatchString(key) {
+		return nil, errChanged
+	}
+	input, err := json.Marshal([]string{"windows-agent-devkit-wsl-lease", key, name, id})
+	if err != nil {
+		return nil, err
+	}
+	want := sha256.Sum256(input)
+	lease, _, err := openPlain(filepath.Join(generation, "active.lease"), false)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(lease, 2*sha256.Size+1))
+	if err != nil || string(data) != hex.EncodeToString(want[:]) {
+		lease.Close()
+		return nil, errChanged
+	}
+	return lease, nil
+}
+
+func startProjectTask(binding launcherBinding, id string) (*os.Process, error) {
+	project, info, err := openPlain(binding.Project, true)
+	if err != nil {
+		return nil, errors.New("The registered Windows project directory is missing or changed.")
+	}
+	defer project.Close()
+	if !projectCwd(binding.Project, info) {
+		return nil, errors.New("Run this WSL task from its registered Windows project directory.")
+	}
+	registry := binding.Dispatcher.Registry
+	runnerDir := filepath.Join(registry, "project-runner-v1")
+	for _, path := range []string{registry, runnerDir} {
+		dir, _, err := openPlain(path, true)
+		if err != nil {
+			return nil, errors.New("The protected WSL project runner directories are missing or changed.")
+		}
+		defer dir.Close()
+	}
+	descriptorFile, _, err := openPlain(filepath.Join(runnerDir, id+".json"), false)
+	if err != nil {
+		return nil, errors.New("The WSL project task descriptor is missing or invalid.")
+	}
+	defer descriptorFile.Close()
+	descriptor, ok := readTaskDescriptor(descriptorFile)
+	if !ok {
+		return nil, errors.New("The WSL project task descriptor is missing or invalid.")
+	}
+	nameDir := filepath.Join(registry, "task-"+descriptor.Name)
+	generation := filepath.Join(nameDir, id)
+	for _, path := range []string{nameDir, generation} {
+		dir, _, err := openPlain(path, true)
+		if err != nil {
+			return nil, errors.New("The protected WSL task directories are missing or changed.")
+		}
+		defer dir.Close()
+	}
+	executable := filepath.Join(generation, "wsl-task.exe")
+	child, info, err := openPlain(executable, false)
+	if err != nil {
+		return nil, errors.New("The registered WSL task launcher is missing or changed.")
+	}
+	defer child.Close()
+	if !matchesPin(child, info, descriptor.Size, descriptor.Hash) {
+		return nil, errors.New("The registered WSL task launcher is missing or changed.")
+	}
+	lease, err := lockTaskLease(registry, generation, descriptor.Name, id)
+	if err != nil {
+		return nil, errors.New("The WSL task lease is missing or changed.")
+	}
+	defer lease.Close()
+	process, err := os.StartProcess(windowsPathPrefix+executable, []string{executable}, &os.ProcAttr{
+		Dir: binding.Project,
+		// A non-nil environment block prevents inheritance even if the binding is empty.
+		Env:   append([]string{}, binding.Environment...),
+		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+		Sys:   &syscall.SysProcAttr{HideWindow: true},
+	})
+	if err != nil {
+		return nil, errors.New("Could not start the registered WSL task launcher.")
+	}
+	return process, nil
+}
+
+func runDispatcher(binding launcherBinding, args []string) int {
+	if len(args) != 1 || !taskIDPattern.MatchString(args[0]) {
+		fmt.Fprintln(os.Stderr, "The WSL project runner requires exactly one lowercase version 4 UUID.")
+		return 2
+	}
+	process, err := startProjectTask(binding, args[0])
+	if err != nil {
+		return fail(err.Error())
+	}
+	result, err := process.Wait()
+	if err != nil {
+		return fail("Could not wait for the registered WSL task launcher.")
+	}
+	return result.ExitCode()
 }
 
 type boundedOutput struct {
@@ -242,18 +432,21 @@ func fail(message string) int {
 }
 
 func run() int {
-	if len(os.Args) != 1 {
-		fmt.Fprintln(os.Stderr, "This WSL task launcher accepts no arguments.")
-		return 2
-	}
 	var binding launcherBinding
 	if json.Unmarshal([]byte(bindingJSON), &binding) != nil {
 		return fail("The WSL task launcher binding is invalid.")
 	}
+	if binding.Dispatcher != nil {
+		return runDispatcher(binding, os.Args[1:])
+	}
+	if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "This WSL task launcher accepts no arguments.")
+		return 2
+	}
 	if !liveLease(binding.Lease) {
 		return fail("The WSL task lease is missing or changed.")
 	}
-	if !projectCwd(binding.Project) {
+	if !projectCwd(binding.Project, nil) {
 		return fail("Run this WSL task from its registered Windows project directory.")
 	}
 	fixture, err := lockDir(binding.Fixture, true)

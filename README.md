@@ -125,12 +125,20 @@ Windows 프로젝트의 기존 명령은 신뢰한 task JSON으로 전달합니�
 
 ## 승인한 WSL 작업 등록
 
-0.3.2에서는 사용자가 반복 실행하도록 선택한 기존 WSL 작업을 Windows 프로젝트에 등록하는 절차를 제공합니다.
-`wsl-register`가 보여 주는 범위와 작업 JSON을 검토한 뒤 반환된 지문으로 등록합니다.
-등록은 전용 Windows 실행 파일과 해당 프로젝트의 `.codex/rules/` 규칙을 만듭니다.
-신뢰된 프로젝트의 새 Codex 대화에서 전용 실행 파일의 절대 경로를 인수 없이 호출합니다.
-`wsl-tasks`로 등록을 확인하고 `wsl-unregister --execute`로 철회합니다.
+0.3.3에서는 반복 실행할 WSL 작업에 프로젝트별 고정 실행기를 사용할 수 있습니다.
+프로젝트마다 한 번 `wsl-enable --project <절대 경로>`로 읽기 전용 검토를 실행합니다.
+같은 명령에 `--execute --confirm <반환된 값>`을 추가하면 보호된 고정 실행기 `project-runner-v1/wsl-run.exe`와 그 실행기만 허용하는 프로젝트 규칙 한 개를 설치합니다.
+활성화 전에 규칙을 읽은 Codex 대화에서는 프로젝트 규칙을 한 번 다시 로드합니다.
+이후 같은 대화에서는 규칙을 다시 불러오지 않고 새로 등록한 작업을 실행할 수 있습니다.
+
+`wsl-register`는 기존과 같이 작업 범위와 JSON을 검토한 뒤 반환된 지문으로 등록합니다.
+공통 실행기를 쓰는 새 작업은 등록 결과나 `wsl-tasks`에서 `executable`과 `args`를 확인합니다.
+같은 Windows 프로젝트 디렉터리에서 `executable`을 직접 호출하고 `args`의 UUID 하나를 전달합니다.
+`wsl-unregister --task-name <이름> --execute`로 해당 UUID의 다음 실행을 차단합니다.
+기존 등록과 공통 실행기를 활성화하지 않은 프로젝트는 0.3.2와 동일한 작업별 규칙과 인수 없는 호출을 사용합니다.
+
 등록 전제조건과 Linux Makefile·Taskfile 예시는 [승인한 WSL 작업 등록 가이드](docs/wsl-task-registration.md)에서 확인합니다.
+실제 앱에서 확인한 0.3.2 동작은 [0.3.2 검증 기록](docs/verification.md#032-wsl-작업-등록)에 있습니다.
 
 ## 개발과 확인
 

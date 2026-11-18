@@ -7,10 +7,13 @@ import { diagnose, VERSION } from './doctor.mjs';
 import { createPlan, applyPlan, rollbackPlan, saveException } from './configure.mjs';
 import { createQuery } from './query.mjs';
 import { VALIDATION_CHECK_IDS } from './validation.mjs';
-import { previewWslRegistration, registerWslTask, listWslTasks, unregisterWslTask } from './wsl-registrations.mjs';
+import {
+  enableWslRunner, previewWslRunner, previewWslRegistration, registerWslTask, listWslTasks, unregisterWslTask,
+} from './wsl-registrations.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
 const WSL_REGISTRATION_OPTIONS = {
+  'wsl-enable': ['execute', 'confirm'],
   'wsl-register': ['task-name', 'distro', 'linux-cwd', 'task-file', 'execute', 'confirm'],
   'wsl-tasks': [],
   'wsl-unregister': ['task-name', 'execute'],
@@ -22,7 +25,7 @@ export const HELP = `Windows Agent Devkit ${VERSION}
 
 사용법: node dist/cli.mjs [명령] [옵션]
 
-명령: doctor, plan, apply, rollback, exception, validate, wsl-register, wsl-tasks, wsl-unregister
+명령: doctor, plan, apply, rollback, exception, validate, wsl-enable, wsl-register, wsl-tasks, wsl-unregister
 
   --project <경로>          프로젝트 디렉터리, 기본값 현재 경로
   --format <text|json>      출력 형식, 기본값 text
@@ -57,9 +60,11 @@ export const HELP = `Windows Agent Devkit ${VERSION}
                           Go Task의 Taskfile을 받는 옵션이 아닙니다.
 
 프로젝트별 WSL 작업 등록:
+  wsl-enable               고정 실행기와 프로젝트 규칙 미리보기
+  wsl-enable --execute --confirm <반환한 confirmation 값>
   wsl-register --task-name <이름> --distro <배포판> --linux-cwd <Linux 절대 경로> --task-file <JSON 파일>
   위 명령에 --execute --confirm <반환한 confirmation 값>을 추가하여 등록
-  wsl-tasks                이 프로젝트의 등록 작업과 전용 실행 경로 확인
+  wsl-tasks                등록 작업의 실행 경로와 인수 확인
   wsl-unregister --task-name <이름> --execute
 
   --help / -h              도움말
@@ -95,7 +100,7 @@ export function parseOptions(args) {
       taskFile: v['task-file'] === undefined ? undefined : resolve(v['task-file']),
     };
   }
-  if (v['task-name'] !== undefined || v.confirm !== undefined) throw new Error('WSL 등록 관련 옵션은 wsl-register 또는 wsl-unregister에서 사용하세요.');
+  if (v['task-name'] !== undefined || v.confirm !== undefined) throw new Error('WSL 등록 관련 옵션은 wsl-enable, wsl-register 또는 wsl-unregister에서 사용하세요.');
   const languages = !v.languages || v.languages === 'auto' ? [] : list(v.languages);
   if (languages.some((i) => !LANGUAGES.includes(i))) throw new Error('--languages에 지원하지 않는 계열이 있습니다.');
   const timeout = v['timeout-ms'] ?? '5000';
@@ -159,7 +164,9 @@ export async function main(args, { inspect, query } = {}) {
   if (options.help) { process.stdout.write(HELP); return 0; }
   if (options.version) { process.stdout.write(`${VERSION}\n`); return 0; }
   let payload;
-  if (options.action === 'wsl-register') {
+  if (options.action === 'wsl-enable') {
+    payload = await (options.execute ? enableWslRunner(options) : previewWslRunner(options));
+  } else if (options.action === 'wsl-register') {
     const request = { ...options, version: VERSION };
     payload = await (options.execute ? registerWslTask(request) : previewWslRegistration(request));
   } else if (options.action === 'wsl-tasks') payload = await listWslTasks(options);

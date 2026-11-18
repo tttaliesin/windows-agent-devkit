@@ -23,6 +23,7 @@ $cli = Join-Path $pluginRoot 'dist/cli.mjs'
 
 명령을 생략하면 `doctor`를 실행합니다.
 기본 출력은 한국어 텍스트이며 `--format json`으로 구조화된 결과를 받습니다.
+`wsl-enable`과 공통 실행기 관련 항목은 0.3.3부터 적용됩니다.
 
 | 명령 | 수행하는 작업 | 실행 조건 |
 | --- | --- | --- |
@@ -32,10 +33,12 @@ $cli = Join-Path $pluginRoot 'dist/cli.mjs'
 | `rollback --execute --journal <ID>` | 해당 저널에서 복구 가능한 자체 파일 변경을 복구합니다. | 기록된 저널 ID와 명시적인 실행 요청이 필요합니다. |
 | `exception --execute --role <역할> --reason <이유>` | 해당 프로젝트와 역할의 유지 예외를 저장합니다. | 명시적인 실행 요청이 필요합니다. |
 | `validate --execute` | 선택한 문맥의 링크·배포판·엔진·서비스 또는 개발 작업을 검증합니다. | 실행 요청과 구체적인 검증 대상이 필요합니다. |
-| `wsl-register` | 선택한 WSL 작업의 등록 입력을 읽기 전용으로 검토하고 확인 지문을 출력합니다. | 0.3.2에서 등록 ID, 배포판, Linux 작업 경로, 작업 JSON을 지정합니다. |
+| `wsl-enable --project <절대 경로>` | 공통 실행기를 둘 프로젝트를 읽기 전용으로 검토하고 `confirmation` 값을 반환합니다. | 0.3.3에서 공통 실행기 사용을 선택한 Windows 프로젝트에 실행합니다. |
+| `wsl-enable --project <절대 경로> --execute --confirm <값>` | 보호된 공통 실행기와 해당 프로젝트 규칙을 설치합니다. | 같은 프로젝트의 검토에서 받은 값으로 한 번 활성화합니다. |
+| `wsl-register` | 선택한 WSL 작업의 등록 입력을 읽기 전용으로 검토하고 확인 지문을 출력합니다. | 등록 이름, 배포판, Linux 작업 경로, 작업 JSON을 지정합니다. |
 | `wsl-register --execute --confirm <지문>` | 검토한 입력에 결합된 작업을 등록합니다. | 같은 입력과 검토에서 반환한 지문이 필요합니다. |
-| `wsl-tasks` | 선택한 Windows 프로젝트의 등록 작업과 전용 실행 경로를 표시합니다. | 0.3.2의 읽기 전용 조회입니다. |
-| `wsl-unregister --task-name <ID> --execute` | 해당 프로젝트의 등록을 철회하고 기존 전용 실행 경로를 봉인합니다. | 0.3.2에서 등록 ID와 명시적인 실행 요청이 필요합니다. |
+| `wsl-tasks` | 선택한 프로젝트의 등록 작업과 호출 정보를 표시합니다. | 읽기 전용 조회입니다. |
+| `wsl-unregister --task-name <이름> --execute` | 선택한 등록 세대의 실행 허가 파일(lease)을 제거합니다. | 등록 이름과 명시적인 실행 요청이 필요합니다. |
 
 실행 대상을 선택하지 않았거나 메타데이터만 확인하려면 `doctor`를 사용합니다.
 `doctor`는 도구 설치, 사용자 프로필 변경, 개발 서비스 기동을 수행하지 않습니다.
@@ -231,14 +234,31 @@ Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드�
 
 ## 승인한 WSL 작업 등록
 
+0.3.3에서 공통 실행기를 사용하려면 `wsl-enable --project <절대 경로>`로 한 번 검토합니다.
+같은 프로젝트를 지정하고 `--execute --confirm <값>`으로 검토에서 받은 `confirmation`을 전달합니다.
+이 호출은 보호된 고정 실행기 `project-runner-v1/wsl-run.exe`와 그 실행기만 허용하는 `.codex/rules/windows-agent-devkit-wsl-runner.rules`를 설치합니다.
+규칙과 설정에서 쓰기 대상은 이 프로젝트의 규칙 파일 한 개로 한정합니다.
+활성화 전에 규칙을 읽은 Codex 대화에서는 프로젝트 규칙을 한 번 다시 로드합니다.
+이후 같은 대화에서 새 작업을 등록하면 규칙 재로딩 없이 실행할 수 있습니다.
+
 반복 실행할 작업을 사용자가 선택한 경우 `wsl-register`를 사용합니다.
-`--project`는 규칙을 두고 전용 `.exe`를 호출할 Windows 프로젝트의 절대 경로입니다.
+`--project`는 규칙을 두고 실행기를 호출할 때 작업 디렉터리로 지정할 Windows 프로젝트의 절대 경로입니다.
 `--linux-cwd`는 선택한 배포판의 네이티브 Linux 파일 시스템에 있는 실제 작업 디렉터리입니다.
 등록용 작업 JSON에는 `context: "wsl"`, `trusted: true`, Linux 실행 파일의 절대 경로인 `tool`과 순서가 있는 문자열 배열인 `args` 네 필드만 지정합니다.
-읽기 전용 검토의 `confirmation` 값은 확인한 입력 그대로 등록할 때 `--confirm`으로 전달합니다.
+`wsl-register` 실행 시 검토한 입력을 그대로 지정하고 `--execute --confirm <지문>`에 반환된 `confirmation`을 전달합니다.
 인수 원문과 순서는 작업 JSON에서 확인합니다.
-`wsl-tasks`에 표시된 전용 `.exe`는 같은 Windows 작업 디렉터리에서 인수 없이 직접 호출합니다.
-설치본과 앱의 확인 상태를 포함한 전체 절차는 [승인한 WSL 작업 등록 가이드](wsl-task-registration.md)에서 확인합니다.
+
+공통 실행기를 사용하는 작업은 `wsl-register`의 등록 결과와 `wsl-tasks` 목록에서 `executable`과 `args`를 받습니다.
+`executable`은 직접 호출할 절대 경로이고 `args`는 해당 등록 세대의 UUID 하나를 담은 배열입니다.
+등록할 때 지정한 Windows 프로젝트 디렉터리에서 이 경로와 인수로 호출합니다.
+`wsl-unregister --task-name <이름> --execute`는 선택한 등록 세대의 실행 허가 파일(lease)을 즉시 제거합니다.
+철회 후에도 공통 규칙은 다른 등록 작업에 적용됩니다.
+철회한 UUID로 다시 호출하면 작업 시작이 거부됩니다.
+이미 시작한 작업은 계속 실행됩니다.
+
+기존 등록과 공통 실행기를 활성화하지 않은 프로젝트에는 0.3.2 방식의 작업별 규칙과 전용 `.exe`를 사용합니다.
+이때 같은 Windows 작업 디렉터리에서 해당 `.exe`를 인수 없이 직접 호출합니다.
+검증 상태와 전체 절차는 [승인한 WSL 작업 등록 가이드](wsl-task-registration.md)에서 확인합니다.
 
 ## 옵션
 
@@ -252,11 +272,11 @@ Windows Job 실행은 원시 출력을 수집하지 않으므로 종료 코드�
 | `--profile <경로>`, `--state-dir <경로>` | 프로필 대상과 저장소 밖 상태 경로를 선택합니다. |
 | `--plan <파일>`, `--journal <ID>` | 적용 계획과 복구 저널을 선택합니다. |
 | `--role <역할>`, `--reason <이유>`, `--scope <범위>` | 유지 예외의 역할·이유·범위를 지정하며 기본 범위는 `project`입니다. |
-| `--execute` | 적용·예외 저장·실행 검증·WSL 작업 등록 및 철회를 명시적으로 요청합니다. |
+| `--execute` | 적용·예외 저장·실행 검증·WSL 공통 실행기 활성화·WSL 작업 등록 및 철회를 명시적으로 요청합니다. |
 | `--distro <이름>`, `--linux-cwd <경로>` | WSL 배포판과 Linux 작업 경로를 선택합니다. |
 | `--linux-tools <목록>` | WSL에서 확인할 Linux 도구를 쉼표 목록으로 선택합니다. |
-| `--task-name <ID>` | `wsl-register`와 `wsl-unregister`에서 프로젝트 내 등록 ID를 지정합니다. |
-| `--confirm <지문>` | 읽기 전용 검토가 반환한 확인 지문을 `wsl-register --execute`에 전달합니다. |
+| `--task-name <이름>` | `wsl-register`와 `wsl-unregister`에서 프로젝트 내 등록 이름을 지정합니다. |
+| `--confirm <값>` | 읽기 전용 검토가 반환한 `confirmation`을 `wsl-enable --execute` 또는 `wsl-register --execute`에 전달합니다. |
 | `--docker-context <이름>`, `--image <참조>` | Docker 검증 문맥과 로컬 이미지를 선택합니다. |
 | `--image-readiness <exit\|running\|healthy>` | 로컬 이미지 검증의 준비 판정 방식을 선택합니다. |
 | `--compose-file <파일>`, `--services <목록>` | Compose 설정과 서비스 목록을 선택합니다. |

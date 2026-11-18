@@ -230,6 +230,12 @@ assert.ok(code===0||code===1);`;
       ], temporary);
       assert.equal(review.code, 0, '번들의 WSL 등록 검토는 배포판이나 Go 실행 없이 작동해야 합니다.');
       assert.match(JSON.parse(review.stdout).confirmation, /^[a-f0-9]{64}$/);
+      const enable = await runNode([cli, 'wsl-enable', '--project', empty], temporary);
+      assert.equal(enable.code, 0, '고정 실행기 검토는 실행기를 빌드하지 않습니다.');
+      const runner = JSON.parse(enable.stdout);
+      assert.equal(runner.state, 'review_required');
+      assert.match(runner.confirmation, /^[a-f0-9]{64}$/);
+      assert.equal(basename(runner.executable), 'wsl-run.exe');
       await assert.rejects(lstat(join(empty, '.codex')), { code: 'ENOENT' }, '등록 검토는 프로젝트 권한 파일을 만들지 않습니다.');
       native = 'passed';
     }

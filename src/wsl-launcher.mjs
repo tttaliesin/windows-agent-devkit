@@ -177,7 +177,7 @@ async function probeLinux(wsl, distro, linuxCwd, tool, cwd, env) {
   }
 }
 
-async function buildLauncher(root, go, binding, env) {
+async function buildLauncher(root, go, binding, env, filename = 'wsl-task.exe') {
   const scratch = await mkdtemp(path.join(root, 'build-'));
   try {
     const source = path.join(scratch, 'main.go');
@@ -204,7 +204,7 @@ async function buildLauncher(root, go, binding, env) {
         GOPROXY: 'off', GOSUMDB: 'off', GOCACHE: cache, GOPATH: path.join(scratch, 'gopath'),
       },
     });
-    const executable = path.join(root, 'wsl-task.exe');
+    const executable = path.join(root, filename);
     await copyFile(built, executable, constants.COPYFILE_EXCL);
     return { executable };
   } catch {
@@ -217,20 +217,56 @@ async function buildLauncher(root, go, binding, env) {
   }
 }
 
-export async function provisionWslLauncher(options) {
+async function launcherHost() {
   if (process.platform !== 'win32' || !Object.hasOwn(GO_ARCH, process.arch)) {
     throw failure('WSL_LAUNCHER_WINDOWS_REQUIRED', 'WSL launcher provisioning requires Windows x64 or ARM64.');
   }
+  const systemRoot = await directoryPath(process.env.SystemRoot).catch(() => null);
+  if (!systemRoot) throw failure('WSL_LAUNCHER_TOOL_REQUIRED', 'The Windows system directory could not be verified.');
+  const system = path.join(systemRoot, 'System32');
+  const paths = String(process.env.PATH ?? '').split(';').map((entry) => entry.trim().replace(/^"(.*)"$/, '$1'));
+  const env = { SystemRoot: systemRoot, WINDIR: systemRoot, SystemDrive: path.parse(systemRoot).root.slice(0, 2), PATHEXT: '.EXE' };
+  return { system, paths, env };
+}
+
+export async function provisionWslProjectRunner({ directory, registryPath, projectPath }) {
+  const { system, paths, env } = await launcherHost();
+  const [root, registry, project] = await Promise.all([directoryPath(directory), directoryPath(registryPath), directoryPath(projectPath)]);
+  if (path.dirname(root) !== registry || inside(project, registry) || inside(registry, project)) {
+    throw failure('WSL_LAUNCHER_INPUTS_INVALID', 'The protected WSL runner directory and project could not be verified.');
+  }
+  const [go, pwsh] = await Promise.all([
+    findNative('go', paths, project),
+    findNative('pwsh', [system, ...paths], project),
+  ]);
+  try {
+    const { stdout } = await run(pwsh, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      '[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)'], {
+      cwd: system, env: { ...env, PATH: system, POWERSHELL_TELEMETRY_OPTOUT: '1' },
+      timeout: 10000, maxBuffer: 16384, windowsHide: true,
+    });
+    const local = await directoryPath(stdout.trim());
+    const expected = path.join(local, 'WindowsAgentDevkit', 'approved-wsl', path.basename(registry));
+    if (expected.toLowerCase() !== registry.toLowerCase() || /(?:^|\\)#!sandbox\./i.test(local)) throw new Error();
+  } catch {
+    // A redirected LOCALAPPDATA must not put the allowed executable in the sandbox's storage.
+    throw failure('WSL_RUNNER_LOCAL_APP_DATA', 'The fixed WSL runner requires the Windows Local Application Data directory outside the sandbox.');
+  }
+  return buildLauncher(root, go, {
+    project, dispatcher: { registry },
+    environment: Object.entries({ ...env, PATH: system }).map(([name, value]) => `${name}=${value}`),
+  }, env, 'wsl-run.exe');
+}
+
+export async function provisionWslLauncher(options) {
+  const host = await launcherHost();
   const { distro, linuxCwd, task, version, leaseValue } = options;
   if (!safe(distro) || !safe(version) || !linuxPath(linuxCwd) || posix.normalize(linuxCwd) !== linuxCwd
     || !isTask(task) || typeof leaseValue !== 'string' || !leaseValue || Buffer.byteLength(leaseValue) > 16384) {
     throw failure('WSL_LAUNCHER_INPUTS_INVALID', 'WSL launcher provisioning requires a trusted WSL task and explicit execution scope.');
   }
   const { root, project, fixture, state, snapshot, lease, taskPin } = await registrationInputs(options);
-  const systemRoot = await directoryPath(process.env.SystemRoot).catch(() => null);
-  if (!systemRoot) throw failure('WSL_LAUNCHER_TOOL_REQUIRED', 'The Windows system directory could not be verified.');
-  const system = path.join(systemRoot, 'System32');
-  const paths = String(process.env.PATH ?? '').split(';').map((entry) => entry.trim().replace(/^"(.*)"$/, '$1'));
+  const { system, paths } = host;
   const [node, pwsh, wsl, go] = await Promise.all([
     findNative('node', [path.dirname(process.execPath)], project),
     findNative('pwsh', [system, ...paths], project),
@@ -242,8 +278,7 @@ export async function provisionWslLauncher(options) {
     throw failure('WSL_LAUNCHER_TOOL_REQUIRED', 'A native runtime directory cannot be used in the fixed launcher environment.');
   }
   const env = {
-    SystemRoot: systemRoot, WINDIR: systemRoot, SystemDrive: path.parse(systemRoot).root.slice(0, 2),
-    PATH: searchPaths.join(';'), PATHEXT: '.EXE', TEMP: state, TMP: state,
+    ...host.env, PATH: searchPaths.join(';'), TEMP: state, TMP: state,
     POWERSHELL_TELEMETRY_OPTOUT: '1', POWERSHELL_UPDATECHECK: 'Off',
     PSModuleAnalysisCachePath: 'NUL',
   };
