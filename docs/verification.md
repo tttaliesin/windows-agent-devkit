@@ -31,6 +31,33 @@ Doctor는 CI의 `build`, `test`, `check`, `package` 호출을 루트 `package.js
 `node --test test/task-runner-report.test.mjs test/task-runners.test.mjs`로 판정과 대조 조건을 재검사할 수 있습니다.
 자동 판정의 적용 범위는 [작업 실행기 가이드](task-runners.md#자동-판정-기준)에 기록합니다.
 
+### 기존 작업 유지와 CI 불일치
+
+`main` 머지 커밋 `9e947c3`의 패키지와 앱 설치본의 파일 24개를 SHA-256으로 대조했습니다.
+같은 앱 대화에서 설치된 0.3.5 Doctor로 테스트 프로젝트를 점검했습니다.
+네 단독 사례에서 Doctor는 루트 작업 선언을 CI 호출과 연결하고 `keep`을 반환했습니다.
+
+| 실행기 | 루트 작업 선언 | CI 호출 |
+| --- | --- | --- |
+| mise tasks | `mise.toml`의 `lint` | `mise run lint` |
+| Go Task | `Taskfile.yml`의 `check-schema` | `task check-schema` |
+| just | `Justfile`의 `format-check` | `just format-check` |
+| GNU Make | `Makefile`의 `verify` | `make verify` |
+
+혼합 사례에서는 위 네 호출과 루트 `package.json`의 `npm test`를 각각 CI 작업에 연결했습니다.
+Doctor는 다섯 실행기를 모두 유지 목록에 넣었습니다.
+단일 실행기 추천 필드인 `recommended`는 `null`이었습니다.
+이 사례에서 `CODEX-01: pass`도 확인했습니다.
+
+혼합 사례의 Make 호출만 선언에 없는 `make missing-target`으로 바꿨습니다.
+Doctor는 `defer`와 `ci_task_not_declared`를 반환했습니다.
+텍스트 보고서에서도 기존 실행기의 유지와 CI 불일치 시의 판단 보류를 확인했습니다.
+
+여섯 건 모두 CLI 종료 코드 0을 반환했습니다.
+Doctor는 프로젝트 작업을 실행하지 않았습니다.
+검증 전후의 Codex 설정 파일과 권한 규칙의 해시가 일치했습니다.
+WSL 승인 상태도 일치했습니다.
+
 ### 권한과 로컬 검사
 
 Doctor 호출에는 앱 대화의 기본 권한을 사용했습니다.
