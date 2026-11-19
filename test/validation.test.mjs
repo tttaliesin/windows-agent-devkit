@@ -61,7 +61,7 @@ function processQuery(session, ready = () => [{ name: 'api', status: 'Running', 
   return { calls, query };
 }
 
-function dockerQuery({ createFails = false, startFails = false, ready = true, foreign = false, cleanupFails = false, volumes = false, imageArch = 'amd64', inspectFails = false, serverFails = false } = {}) {
+function dockerQuery({ createFails = false, startFailure, ready = true, foreign = false, cleanupFails = false, volumes = false, imageArch = 'amd64', inspectFails = false, serverFails = false } = {}) {
   const calls = [];
   let owner, created = false, started = false, removed = false;
   const resource = () => ({ Id: CID, Config: { Labels: { [LABEL]: foreign ? 'someone-else' : owner } }, State: { Running: started && !ready, Status: started && ready ? 'exited' : started ? 'running' : 'created', ExitCode: 0 } });
@@ -77,7 +77,7 @@ function dockerQuery({ createFails = false, startFails = false, ready = true, fo
     if (args[0] === 'create') { owner = args[args.indexOf('--label') + 1].split('=')[1]; created = true; return createFails ? failure('timed_out') : success(CID); }
     if (args[0] === 'inspect') return inspectFails || !created || removed ? failure() : success([resource()]);
     if (args[0] === 'ps') return success(created && !removed && !foreign ? `${CID}\n` : '');
-    if (args[0] === 'start') { started = true; return startFails ? failure() : success(CID); }
+    if (args[0] === 'start') { started = true; return startFailure ? failure(startFailure) : success(CID); }
     if (args[0] === 'rm') { assert.equal(args.at(-1), CID); if (cleanupFails) return failure(); removed = true; return success(CID); }
     assert.fail(`Unexpected Docker command: ${args[0]}`);
   };
@@ -312,11 +312,17 @@ test('이미지 smoke는 로컬 이미지로만 생성·시작·준비·소유�
 });
 
 test('이미지 생성·시작 실패와 준비 시간 초과에도 소유 자원을 정리한다', async () => {
-  for (const changes of [{ createFails: true }, { startFails: true }, { ready: false }]) {
+  for (const [changes, stopStatus] of [
+    [{ createFails: true }, 'unknown'],
+    [{ startFailure: 'failed' }, 'pass'],
+    [{ startFailure: 'timed_out' }, 'unknown'],
+    [{ ready: false }, 'pass'],
+  ]) {
     const { query, calls } = dockerQuery(changes);
     const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, dockerContext: 'chosen', image: 'existing:local', timeoutMs: 20 }, query });
     assert.equal(check(report, 'CTR-02').status, 'fail');
-    assert.ok(calls.some((item) => item.args[2] === 'rm')); assert.ok(has(report, 'CTR-02', 'image.stop', changes.createFails ? 'unknown' : 'pass'));
+    assert.ok(calls.some((item) => item.args[2] === 'rm'));
+    assert.ok(has(report, 'CTR-02', 'image.stop', stopStatus));
   }
 });
 
@@ -330,40 +336,131 @@ test('이미지 소유권 불일치·정리 실패·플랫폼 차이·자동 볼
   }
 });
 
-test('Compose는 고유 프로젝트와 설정 snapshot으로 선택 서비스만 기동하고 이미지를 보존한다', async () => {
-  const calls = []; let owner, snapshot, commands, created = false, network = false;
-  const networkId = 'c'.repeat(64);
+const COMPOSE_NETWORK_ID = 'c'.repeat(64);
+
+async function composeLifecycle({ timedOutRemoval, resourceRemains = false, networkDisappearsBeforeInspect = false } = {}) {
+  const calls = [];
+  const resources = new Set();
+  let owner, snapshot, commands;
+  const remove = (id) => {
+    if (id !== timedOutRemoval || !resourceRemains) resources.delete(id);
+    return id === timedOutRemoval ? failure('timed_out') : success();
+  };
   const query = async (tool, args) => {
-    calls.push(args);
+    assert.equal(tool, 'docker');
     if (args[0] === 'context') return success({ Name: 'chosen', Endpoints: { docker: { Host: 'npipe:////./pipe/docker_engine' } } });
+    assert.deepEqual(args.slice(0, 2), ['--context', 'chosen']);
     const command = args.slice(2);
     if (command[0] === 'version') return success({ Os: 'linux', Arch: 'amd64' });
-    if (command[0] === 'image') return success([{ Id: IMAGE_ID, Os: 'linux', Architecture: 'amd64', Config: {} }]);
-    if (command[0] === 'ps') return success(created ? CID : '');
+    if (command[0] === 'image' && command[1] === 'inspect') return success([{ Id: IMAGE_ID, Os: 'linux', Architecture: 'amd64', Config: {} }]);
+    if (command[0] === 'ps' || (command[0] === 'network' && command[1] === 'ls')) {
+      assert.ok(command.includes(`label=com.docker.compose.project=${owner}`));
+      const id = command[0] === 'ps' ? CID : COMPOSE_NETWORK_ID;
+      return success(resources.has(id) ? id : '');
+    }
     if (command[0] === 'volume') return success();
     if (command[0] === 'network') {
-      if (command[1] === 'ls') return success(network ? networkId : '');
-      if (command[1] === 'inspect') return success([{ Id: networkId, Name: `${owner}_default`, Labels: { 'com.docker.compose.project': owner } }]);
-      if (command[1] === 'rm') { network = false; return success(); }
+      assert.equal(command.at(-1), COMPOSE_NETWORK_ID);
+      if (command[1] === 'inspect') {
+        if (networkDisappearsBeforeInspect) resources.delete(COMPOSE_NETWORK_ID);
+        if (!resources.has(COMPOSE_NETWORK_ID)) return failure('failed', `network ${COMPOSE_NETWORK_ID} not found`);
+        return success([{ Id: COMPOSE_NETWORK_ID, Name: `${owner}_default`, Labels: { 'com.docker.compose.project': owner } }]);
+      }
+      if (command[1] === 'rm') return remove(COMPOSE_NETWORK_ID);
     }
-    if (command[0] === 'inspect') return success([{ Id: CID, Config: { Labels: { [LABEL]: owner, 'com.docker.compose.project': owner } } }]);
-    if (command[0] === 'rm') { assert.deepEqual(command, ['rm', '--force', CID]); created = false; return success(); }
+    if (command[0] === 'inspect') {
+      assert.equal(command.at(-1), CID);
+      return resources.has(CID) ? success([{ Id: CID, Config: { Labels: { [LABEL]: owner, 'com.docker.compose.project': owner } } }]) : failure();
+    }
+    if (command[0] === 'rm') { assert.deepEqual(command, ['rm', '--force', CID]); return remove(CID); }
     assert.equal(command[0], 'compose'); owner = command[command.indexOf('--project-name') + 1];
     assert.match(owner, /^devkit-[a-f0-9-]+$/);
     const file = command[command.indexOf('--file') + 1];
     const op = command[5];
     if (op === 'config') return success({ name: owner, services: { api: { image: 'existing:local', command: ['node', 'server.mjs'], healthcheck: { test: ['CMD', 'true'] } } }, networks: { default: { name: `${owner}_default` } } });
     snapshot = file; commands = JSON.parse(await readFile(snapshot, 'utf8')).services.api.command;
-    if (op === 'up') { assert.deepEqual(command.slice(-1), ['api']); assert.ok(command.includes('--no-deps')); created = true; network = true; return success(); }
+    if (op === 'up') {
+      assert.deepEqual(command.slice(-1), ['api']);
+      assert.ok(command.includes('--no-deps'));
+      resources.add(CID);
+      resources.add(COMPOSE_NETWORK_ID);
+      return success();
+    }
     if (op === 'ps') return success([{ Project: owner, Service: 'api', State: 'running', Health: 'healthy' }]);
     assert.fail(`Unexpected compose operation: ${op}`);
   };
-  const report = await validateEnvironment({ projectPath: PROJECT, options: { execute: true, dockerContext: 'chosen', composeFile: 'compose.yaml', composeServices: ['api'] }, query });
+  const report = await validateEnvironment({
+    projectPath: PROJECT,
+    options: { execute: true, dockerContext: 'chosen', composeFile: 'compose.yaml', composeServices: ['api'], cleanupGraceMs: 120 },
+    query: async (tool, args) => {
+      const result = await query(tool, args);
+      calls.push({ command: args.slice(2), state: result.state, stdout: result.stdout });
+      return result;
+    },
+  });
+  return { report, calls, resources, snapshot, commands };
+}
+
+test('Compose는 고유 프로젝트와 설정 snapshot으로 선택 서비스만 기동하고 이미지를 보존한다', async () => {
+  const { report, resources, snapshot, commands } = await composeLifecycle();
   assert.equal(check(report, 'CTR-02').status, 'pass');
   assert.deepEqual(commands, ['node', 'server.mjs']);
-  assert.equal(created, false); assert.equal(network, false);
+  assert.equal(resources.size, 0);
   for (const phase of ['compose.start', 'compose.ready', 'compose.stop']) assert.ok(has(report, 'CTR-02', phase, 'pass'));
   await assert.rejects(readFile(snapshot), { code: 'ENOENT' });
+});
+
+test('Compose 삭제 응답이 시간 초과여도 재조회에서 소유 자원 부재를 확인하면 종료에 성공한다', async (t) => {
+  for (const [resource, id] of [['컨테이너', CID], ['네트워크', COMPOSE_NETWORK_ID]]) {
+    await t.test(resource, async () => {
+      const { report, calls } = await composeLifecycle({ timedOutRemoval: id });
+      for (const phase of ['compose.start', 'compose.ready']) assert.ok(has(report, 'CTR-02', phase, 'pass'));
+      const deletions = calls.filter(({ command }) => command.includes('rm'));
+      assert.ok(deletions.some(({ command, state }) => command.at(-1) === id && state === 'timed_out'));
+      const freshEmptyListings = calls.slice(calls.indexOf(deletions.at(-1)) + 1)
+        .filter(({ state, stdout }) => state === 'succeeded' && stdout === '');
+      assert.ok(freshEmptyListings.some(({ command }) => command[0] === 'ps'));
+      assert.ok(freshEmptyListings.some(({ command }) => command[0] === 'network' && command[1] === 'ls'));
+
+      const stop = stages(report, 'CTR-02').find(({ phase }) => phase === 'compose.stop');
+      assert.equal(stop.absenceConfirmed, true);
+      assert.equal(stop.status, 'pass');
+      assert.equal(check(report, 'CTR-02').status, 'pass');
+      assert.deepEqual([...stop.removedIds].sort(), [CID, COMPOSE_NETWORK_ID]);
+      assert.deepEqual(report.evidence['CTR-02'].recovery ?? [], []);
+    });
+  }
+});
+
+test('Compose 삭제 응답이 시간 초과되고 소유 자원이 남으면 종료를 미확인으로 보고한다', async () => {
+  const { report, calls } = await composeLifecycle({ timedOutRemoval: COMPOSE_NETWORK_ID, resourceRemains: true });
+  for (const phase of ['compose.start', 'compose.ready']) assert.ok(has(report, 'CTR-02', phase, 'pass'));
+  assert.ok(calls.some(({ command, state }) => command[0] === 'network' && command[1] === 'rm' && state === 'timed_out'));
+  const evidence = report.evidence['CTR-02'];
+  const stop = evidence.steps.find(({ phase }) => phase === 'compose.stop');
+  assert.equal(stop.status, 'unknown');
+  assert.equal(check(report, 'CTR-02').status, 'unknown');
+  assert.equal(stop.absenceConfirmed, false);
+  assert.deepEqual(stop.removedIds, [CID]);
+  assert.deepEqual(evidence.recovery[0].remainingIds, [COMPOSE_NETWORK_ID]);
+});
+
+test('Compose 네트워크가 목록 조회와 상세 조회 사이에 사라지면 재조회로 종료를 확인한다', async () => {
+  const { report, calls } = await composeLifecycle({ networkDisappearsBeforeInspect: true });
+  const listed = calls.findIndex(({ command, state, stdout }) => command[0] === 'network' && command[1] === 'ls'
+    && state === 'succeeded' && stdout === COMPOSE_NETWORK_ID);
+  const inspected = calls.findIndex(({ command, state }) => command[0] === 'network' && command[1] === 'inspect'
+    && command.at(-1) === COMPOSE_NETWORK_ID && state === 'failed');
+  assert.ok(listed >= 0 && inspected > listed);
+  assert.ok(calls.slice(inspected + 1).some(({ command, state, stdout }) => command[0] === 'network' && command[1] === 'ls'
+    && state === 'succeeded' && stdout === ''));
+  assert.ok(!calls.some(({ command }) => command[0] === 'network' && command[1] === 'rm'));
+
+  const stop = stages(report, 'CTR-02').find(({ phase }) => phase === 'compose.stop');
+  assert.equal(stop.absenceConfirmed, true);
+  assert.equal(stop.status, 'pass');
+  assert.deepEqual(stop.removedIds, [CID]);
+  assert.equal(check(report, 'CTR-02').status, 'pass');
 });
 
 test('Compose 고정 이름과 기존 볼륨을 발견하면 기동·정리 명령을 실행하지 않는다', async () => {
