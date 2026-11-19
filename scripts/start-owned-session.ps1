@@ -79,7 +79,7 @@ public static class DevkitOwnedJob {
         return output.Append('\\', slashes * 2).Append('"').ToString();
     }
     static void Emit(string token, string kind, uint pid, long code, bool forced, uint active, string reason) {
-        Console.Out.WriteLine("{\"protocol\":1,\"token\":\"" + token + "\",\"event\":\"" + kind
+        Console.Out.WriteLine("{\"protocol\":2,\"token\":\"" + token + "\",\"event\":\"" + kind
             + "\",\"pid\":" + pid + ",\"exitCode\":" + (code < 0 ? "null" : code.ToString(System.Globalization.CultureInfo.InvariantCulture))
             + ",\"forced\":" + (forced ? "true" : "false") + ",\"activeProcesses\":" + active
             + ",\"reason\":\"" + reason + "\"}");
@@ -114,9 +114,11 @@ public static class DevkitOwnedJob {
             startup.Startup.Flags = 0x100; startup.Startup.Input = nul; startup.Startup.Output = nul; startup.Startup.Error = nul;
             var command = new StringBuilder(Quote(exe));
             foreach (string arg in args) command.Append(' ').Append(Quote(arg));
-            // Console.In's synchronized reader can complete ReadLineAsync synchronously.
-            var control = System.Threading.Tasks.Task.Run(() => Console.In.ReadLine());
-            if (!control.IsCompleted) {
+            // A queued stop before readiness must never race with process creation.
+            Emit(token, "ready", 0, -1, false, 0, "helper_ready");
+            var control = Console.In.ReadLine() == "start"
+                ? System.Threading.Tasks.Task.Run(() => Console.In.ReadLine()) : null;
+            if (control != null && !control.IsCompleted) {
                 // Only NUL is inherited; the child cannot spoof the owner's stdout handshake.
                 Check(CreateProcessW(exe, command, IntPtr.Zero, IntPtr.Zero, true, 0x08080404, IntPtr.Zero, cwd, ref startup, out process));
                 if (!AssignProcessToJobObject(job, process.Process)) {
@@ -135,7 +137,7 @@ public static class DevkitOwnedJob {
                         Check(TerminateJobObject(job, 1)); break;
                     }
                 }
-            } else { forced = true; reason = "owner_disconnected"; }
+            } else { reason = "start_cancelled"; }
         } catch { failed = true; reason = "native_failure"; }
         finally {
             if (job != IntPtr.Zero) {
