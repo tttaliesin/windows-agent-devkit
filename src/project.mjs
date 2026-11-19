@@ -7,6 +7,7 @@ import { existingEntry as exists, inside, MAX_BYTES, MAX_DEPTH, MAX_ENTRIES, MAX
 import { parseGlobalJson } from './project/global-json.mjs';
 import { parseJsonObject, stripJsonComments } from './project/json.mjs';
 import { analyzeTaskRunner, TASK_RUNNER_FILES, taskRunnerInvocation, taskRunnerTool } from './task-runners.mjs';
+import { taskRunnerWorkflowEvidence, taskRunnerWorkflowStep } from './task-runner-ci.mjs';
 
 const LANGUAGES = ['node', 'python', 'go', 'rust', 'zig', 'dotnet'];
 const UNKNOWN = Symbol('지원하지 않는 정적 표현');
@@ -20,6 +21,8 @@ const NODE_LOCKS = {
 };
 const PYTHON_LOCKS = { 'uv.lock': 'uv', 'poetry.lock': 'poetry', 'Pipfile.lock': 'pipenv' };
 const ALIASES = Object.assign(Object.create(null), { node: 'node', nodejs: 'node', python: 'python', go: 'go', golang: 'go', rust: 'rust', zig: 'zig', dotnet: 'dotnet' });
+const RUNNER_PINS = new Set(['task', 'just', 'make']);
+const MISE_RUNNER_PINS = new Map([['aqua:go-task/task', 'task'], ['aqua:casey/just', 'just']]);
 const EXACT = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z.-]+)?$/;
 const PARTIAL = /^v?\d+(?:\.\d+){0,2}$/;
 const GO_VERSION = /^1\.\d+(?:\.\d+)?(?:(?:rc|beta)\d+)?$/;
@@ -62,6 +65,36 @@ const staticPath = (value) => typeof value === 'string' && value.length > 0 && v
 const identifier = (value) => typeof value === 'string' && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(value) && !['__proto__', 'constructor', 'prototype'].includes(value);
 
 const devcontainerJson = (text) => stripJsonComments(text).replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, end) => end ?? match);
+
+const workspaceRoot = (directory) => directory === undefined || directory === '.' || directory === './';
+const hostCIShells = new Set([undefined, 'bash', 'sh', 'cmd', 'pwsh', 'powershell']);
+const literalCheckout = /^actions\/checkout@[A-Za-z0-9_][A-Za-z0-9_./-]*$/i;
+
+function ciRunSetting(key, step, job, workflow) {
+  if (has(step, key)) return step[key];
+  for (const { defaults } of [job, workflow]) {
+    if (defaults === undefined) continue;
+    if (!object(defaults)) return UNKNOWN;
+    if (defaults.run === undefined) continue;
+    if (!object(defaults.run)) return UNKNOWN;
+    if (has(defaults.run, key)) return defaults.run[key];
+  }
+}
+
+function usesDefaultCheckout(step) {
+  if (typeof step?.uses !== 'string' || !/^actions\/checkout@/i.test(step.uses)) return true;
+  const inputs = step.with;
+  return inputs === undefined || (object(inputs) &&
+    (inputs.repository === undefined || inputs.repository === '') && (workspaceRoot(inputs.path) || inputs.path === ''));
+}
+
+function recordRunnerPin(pins, tool, versions) {
+  const exact = versions.length > 0 && versions.length <= 32 && versions.every((item) => {
+    const version = object(item) && Object.keys(item).length === 1 ? item.version : item;
+    return typeof version === 'string' && version.length <= 160 && version.trim() === version && EXACT.test(version);
+  });
+  pins.set(tool, !pins.has(tool) && exact);
+}
 
 function yamlDocument(text) {
   const document = parseDocument(text, { merge: true, uniqueKeys: true, stringKeys: true, prettyErrors: false });
@@ -127,6 +160,7 @@ export async function analyzeProject(projectPath) {
   const metadata = {
     scope: { boundary: '.', boundaryKind: 'project', ancestorDirectories: [], maxDepth: MAX_DEPTH, maxFiles: MAX_FILES, maxBytes: MAX_BYTES },
     declarations: [], workspaces: [], ci: [], taskRunners: [], taskRunnerCI: [],
+    taskRunnerWorkflows: [], taskRunnerPreferences: [], taskRunnerLanguages: [],
     processCompose: { source: null, sources: [], services: [], configurations: [], dynamicEnvironment: false },
     compose: { sources: [], services: [], configurations: [], dynamicEnvironment: false },
     dockerfiles: [],
@@ -144,6 +178,8 @@ export async function analyzeProject(projectPath) {
     else metadata.taskRunners[index] = record;
   };
   const localLanguages = new Set();
+  const workflowJobs = [];
+  const selectedMiseRunnerPins = new Set();
   const mark = (language, local = true) => {
     if (local) localLanguages.add(language);
     if (requirements[language].state !== 'unknown') requirements[language].state = 'required';
@@ -408,16 +444,30 @@ export async function analyzeProject(projectPath) {
 
   function miseDeclaration(text, source) {
     const languages = LANGUAGES.filter((language) => canSelectVersion('mise', language, source));
-    if (!languages.length) return;
+    const rootMise = source === '.mise.toml' || source === 'mise.toml';
+    if (!languages.length && !rootMise) return;
     const data = asToml(text, languages, source);
     if (!data) { for (const language of languages) selectVersion('mise', language, source); return; }
-    if (data.contains('include')) {
+    if (languages.length && data.contains('include')) {
       if (declaration) declaration.unresolvedFields = ['include'];
       unknown(languages, source, 'mise 외부 포함 선언은 따라가지 않으므로 추가 요구를 확인할 수 없습니다.');
     }
     const inline = data.get('tools');
     if (inline === undefined) return;
     if (!object(inline)) { unknown(languages, source, 'mise tools 필드의 정적 테이블 형식을 지원하지 않습니다.'); return; }
+    if (rootMise) {
+      const pins = new Map();
+      for (const [key, value] of Object.entries(inline)) {
+        const tool = MISE_RUNNER_PINS.get(key) ?? key;
+        if (RUNNER_PINS.has(tool) && !selectedMiseRunnerPins.has(tool)) {
+          recordRunnerPin(pins, tool, Array.isArray(value) ? value : [value]);
+        }
+      }
+      for (const [tool, exact] of pins) {
+        selectedMiseRunnerPins.add(tool);
+        if (exact) metadata.taskRunnerPreferences.push({ tool, source });
+      }
+    }
     for (const [key, value] of Object.entries(inline)) {
       const language = ALIASES[key.split(':').at(-1)];
       if (!language || !selectVersion('mise', language, source)) continue;
@@ -435,10 +485,12 @@ export async function analyzeProject(projectPath) {
 
   function toolVersions(text, source) {
     const seen = new Set();
+    const pins = new Map();
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.replace(/\s*#.*$/, '').trim();
       if (!line) continue;
       const [key, ...versions] = line.split(/\s+/), language = ALIASES[key];
+      if (source === '.tool-versions' && RUNNER_PINS.has(key)) recordRunnerPin(pins, key, versions);
       if (!language || !selectVersion('asdf', language, source)) continue;
       mark(language);
       (requirements[language].metadata.versionManagers ??= []).push('asdf');
@@ -447,6 +499,7 @@ export async function analyzeProject(projectPath) {
       if (!versions.length || versions.length > 32) unknown([language], source, '.tool-versions 버전 목록의 형식을 지원하지 않습니다.');
       for (const version of versions.slice(0, 32)) request(language, source, key, version, { channels: true });
     }
+    for (const [tool, exact] of pins) if (exact) metadata.taskRunnerPreferences.push({ tool, source });
   }
 
   function condaDeclaration(text, source) {
@@ -781,6 +834,9 @@ export async function analyzeProject(projectPath) {
     try { data = yamlDocument(text); }
     catch { uncertain(record, source, 'CI YAML의 문법·태그·별칭 한도를 확인할 수 없습니다.'); return; }
     if (!object(data.jobs)) { uncertain(record, source, 'CI jobs의 정적 매핑을 확인할 수 없습니다.'); return; }
+    const workflowAtProjectRoot = source.startsWith('.github/workflows/') &&
+      (metadata.scope.boundaryKind !== 'repository' || metadata.scope.boundary === '.');
+    const repositoryWorkflow = workflowAtProjectRoot && metadata.scope.boundaryKind === 'repository' && metadata.scope.boundary === '.';
     const setups = {
       'actions/setup-node': ['node', 'node-version', 'node-version-file'],
       'actions/setup-python': ['python', 'python-version', 'python-version-file'],
@@ -809,10 +865,20 @@ export async function analyzeProject(projectPath) {
         return values.length > 0 && values.length <= 64 ? unique(values) : null;
       };
       if (job.steps !== undefined && !Array.isArray(job.steps)) { uncertain(entry, source, 'CI steps의 정적 목록을 확인할 수 없습니다.'); continue; }
-      for (const [index, step] of (job.steps ?? []).entries()) {
+      const steps = job.steps ?? [];
+      const hostWorkspaceAtProjectRoot = workflowAtProjectRoot && entry.executionLocation === 'host' && !has(job, 'uses') && steps.every(usesDefaultCheckout);
+      const workflowSteps = repositoryWorkflow && hostWorkspaceAtProjectRoot && entry.runsOn?.length && !has(job, 'if') ? [] : null;
+      let afterCheckout = false;
+      for (const [index, step] of steps.entries()) {
         if (object(step)) {
-          const invocation = taskRunnerInvocation(step.run);
+          const atProjectRoot = hostWorkspaceAtProjectRoot && !has(step, 'uses') &&
+            workspaceRoot(ciRunSetting('working-directory', step, job, data)) && hostCIShells.has(ciRunSetting('shell', step, job, data));
+          const invocation = taskRunnerInvocation(step.run, { atProjectRoot });
           if (invocation) metadata.taskRunnerCI.push({ source, job: id, step: index, ...invocation, executionLocation: entry.executionLocation });
+          if (workflowSteps) {
+            workflowSteps[index] = taskRunnerWorkflowStep(step, { atProjectRoot, afterCheckout });
+            if (typeof step.uses === 'string' && literalCheckout.test(step.uses) && !has(step, 'run') && !has(step, 'if')) afterCheckout = true;
+          }
         }
         if (!object(step) || typeof step.uses !== 'string') continue;
         const action = step.uses.split('@')[0];
@@ -842,6 +908,7 @@ export async function analyzeProject(projectPath) {
         } else if (!versions) uncertain(evidence, source, matrix?.exclude !== undefined ? 'CI matrix.exclude의 조합 선택은 지원하지 않아 해당 버전 요구만 미확인입니다.' : 'CI 도구 버전이 없거나 정적 행렬 참조로 해석할 수 없습니다.');
         if (evidence.state === 'unknown') entry.state = 'unknown';
       }
+      if (workflowSteps && afterCheckout) workflowJobs.push({ source, job: id, steps: workflowSteps });
       if (entry.state === 'unknown') record.state = 'unknown';
     }
   }
@@ -1092,6 +1159,8 @@ export async function analyzeProject(projectPath) {
     if (requirement.state === 'required' && !requirement.versionRequests.length) note(language, '관련 선언은 있으나 정적으로 확인한 언어 버전 요구는 없습니다.');
   }
   if (result.files.includes('rust-toolchain') && result.files.includes('rust-toolchain.toml')) unknown(['rust'], 'rust-toolchain, rust-toolchain.toml', 'Rust 도구 모음 파일이 둘 다 존재하여 선택 우선순위를 별도로 확인해야 합니다.');
+  metadata.taskRunnerLanguages = [...localLanguages].filter((language) => requirements[language].state === 'required');
+  metadata.taskRunnerWorkflows = taskRunnerWorkflowEvidence(workflowJobs);
   const containerContext = metadata.devcontainer?.runtimeLocation;
   metadata.execution.location = containerContext ?? 'host';
   for (const language of LANGUAGES) {

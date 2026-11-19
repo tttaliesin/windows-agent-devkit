@@ -135,7 +135,23 @@ export function formatReport(report) {
     }
   }
   if (report.taskRunners) {
-    lines.push('', `작업 실행기 권장: mise tasks (${report.taskRunners.recommendation.status})`);
+    const { recommendation } = report.taskRunners;
+    const decision = recommendation.action === 'keep' ? `기존 ${recommendation.expected} 유지`
+      : recommendation.action === 'suggest' ? `${recommendation.expected} 도입 제안` : '판단 보류';
+    lines.push('', `작업 실행기 권장: ${decision}`, `  ${recommendation.message}`);
+    for (const call of recommendation.evidence.ci ?? []) {
+      const location = `${call.source} / ${call.job} / 단계 ${call.step + 1}`;
+      if (call.definitions) lines.push(`  ${location} → ${call.definitions.join(', ')}의 ${call.task}`);
+      else lines.push(`  ${location}의 ${[call.tool, call.task].filter(Boolean).join(' ')} 호출과 작업 선언의 연결은 미확인입니다.`);
+    }
+    for (const workflow of recommendation.evidence.workflows ?? []) {
+      for (const job of workflow.jobs) {
+        lines.push(`  ${job.source} / ${job.job} / 단계 ${job.steps.map((index) => index + 1).join(', ')}에 공통 절차가 선언되어 있습니다.`);
+      }
+    }
+    for (const entry of recommendation.evidence.preferences ?? []) {
+      lines.push(`  ${entry.source}${entry.job ? ` / ${entry.job} / 단계 ${entry.step + 1}` : ''}에서 ${entry.tool} 선택을 확인했습니다.`);
+    }
     for (const item of report.taskRunners.declarations) lines.push(`  ${item.tool}: ${item.source} (${item.state}), 작업: ${item.tasks.join(', ') || '미확인'}`);
     for (const item of report.taskRunners.tools) lines.push(`  실행 파일 ${item.tool}: ${item.version ?? '버전 미확인'} (${item.execution})${item.executable ? `, ${item.executable}` : ''}`);
   }

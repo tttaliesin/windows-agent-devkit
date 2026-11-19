@@ -412,8 +412,15 @@ export function analyzeTaskRunner({ tool, source, text, reason }) {
   }
 }
 
-/** Identify only the leading simple CI command; never evaluate a shell program. */
-export function taskRunnerInvocation(run) {
+const npmInstallFlags = new Set(['--ignore-scripts', '--no-audit', '--no-fund']);
+const npmInstallCommands = new Set(['ci', 'install', 'i']);
+
+function singleCommand(run, line) {
+  return run.trim() === line && !/[\r\n]/.test(line) && !/[^\S \t\r\n]/.test(run);
+}
+
+/** Identify the leading CI invocation without evaluating the shell program. */
+export function taskRunnerInvocation(run, { atProjectRoot = false } = {}) {
   if (typeof run !== 'string') return null;
   const line = run.split(/\r?\n/).map((value) => value.trim()).find((value) => value && !value.startsWith('#'));
   if (!line) return null;
@@ -422,18 +429,31 @@ export function taskRunnerInvocation(run) {
   const tool = match[1].toLowerCase().replace(/\.(?:exe|cmd)$/, '');
   const result = { tool, state: 'declared' };
   const rest = line.slice(match[0].length).trim(), tokens = rest.split(/\s+/).filter(Boolean);
+  const single = singleCommand(run, line);
   if (!tokens.length) return result;
+  if (single && rest === '--version') return { ...result, kind: 'tool_inspection' };
+  if (single && tool === 'mise' && rest === 'install') return { ...result, kind: 'tool_setup' };
+  if (tool === 'npm' && npmInstallCommands.has(tokens[0])) {
+    if (single && tokens.slice(1).every((token) => npmInstallFlags.has(token))) result.kind = 'dependency_install';
+    else result.state = 'unknown';
+    return result;
+  }
   let target;
+  let taskArgumentCount = 1;
   if (tool === 'mise') {
     if (['run', 'r'].includes(tokens[0])) target = tokens[1];
     else { result.state = 'unknown'; return result; }
+    taskArgumentCount = 2;
   } else if (tool === 'npm') {
-    if (['run', 'run-script'].includes(tokens[0])) target = tokens[1];
+    const runsScript = ['run', 'run-script'].includes(tokens[0]);
+    if (runsScript) target = tokens[1];
     else if (['test', 'start', 'stop', 'restart'].includes(tokens[0])) target = tokens[0];
     else { result.state = 'unknown'; return result; }
+    if (runsScript) taskArgumentCount = 2;
   } else target = tokens[0];
   if (target !== undefined && safeName(target)) result.task = target;
   else result.state = 'unknown';
   if (dynamic(rest) || /[|&;<>\\]/.test(rest) || tokens[0].startsWith('-')) result.state = 'unknown';
+  if (atProjectRoot && tokens.length === taskArgumentCount && result.state === 'declared' && single) result.atProjectRoot = true;
   return result;
 }

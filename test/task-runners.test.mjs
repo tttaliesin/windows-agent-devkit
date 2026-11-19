@@ -355,6 +355,7 @@ test('CI 정적 선두 호출은 작업 이름과 실행 위치만 별도 수집
     ['host', 3, 'just', 'declared', 'check', 'host'], ['host', 4, 'make', 'declared', 'check', 'host'],
     ['host', 5, 'npm', 'declared', 'check', 'host'], ['container', 0, 'npm', 'declared', 'test', 'container'],
   ]);
+  assert.deepEqual(project.metadata.taskRunnerCI.map(({ atProjectRoot }) => atProjectRoot), [undefined, true, true, true, undefined, undefined]);
   assert.ok(project.metadata.taskRunnerCI.every((entry) => entry.source === '.github/workflows/check.yml'));
   assert.deepEqual(project.requirements.node.metadata.ciRequirements[0].versionRequests.map((entry) => entry.value), ['22', '24']);
   assert.deepEqual(project.requirements.node.versionRequests, []);
@@ -377,6 +378,244 @@ test('CI의 동적 작업·옵션·복합 셸은 미확인이며 비선두 호�
   for (const command of [`echo ${PRIVATE} && npm run check`, `env TOKEN=${PRIVATE} task check`, `\u0024{{ matrix.${PRIVATE} }} check`, 42, null]) assert.equal(taskRunnerInvocation(command), null);
   assert.deepEqual(taskRunnerInvocation('# comment\n\n npm.cmd run check -- --token=PRIVATE\n echo ignored'), { tool: 'npm', state: 'declared', task: 'check' });
   assert.deepEqual(taskRunnerInvocation('make'), { tool: 'make', state: 'declared' });
+});
+
+test('단일 npm ci는 작업 이름 없이 의존성 설치로 분류한다', () => {
+  for (const command of ['npm ci', 'npm ci --ignore-scripts', '  npm.cmd ci --ignore-scripts --no-audit --no-fund\r\n']) {
+    assert.deepEqual(taskRunnerInvocation(command), { tool: 'npm', state: 'declared', kind: 'dependency_install' }, command);
+  }
+  for (const command of [
+    'npm ci --prefix ./app', 'npm ci --workspace app', 'npm ci --ignore-scripts=false', 'npm ci -- --ignore-scripts',
+    'npm ci --ignore-scripts \u0024{{ inputs.flags }}', 'npm ci --token=' + PRIVATE,
+    'npm ci && npm test', 'npm ci\nnpm test', 'npm ci | npm test', 'npm ci > output', 'npm ci \\\n--ignore-scripts',
+  ]) {
+    assert.deepEqual(taskRunnerInvocation(command), { tool: 'npm', state: 'unknown' }, command);
+  }
+});
+
+test('다섯 실행기의 루트 작업 근거는 이름만 주는 단일 호출에 붙인다', () => {
+  for (const [tool, command] of [
+    ['mise', 'mise.exe r check'], ['task', 'task.exe check'], ['just', 'just check'],
+    ['make', 'make check'], ['npm', 'npm.cmd run check'],
+  ]) {
+    const expected = { tool, state: 'declared', task: 'check' };
+    assert.deepEqual(taskRunnerInvocation(command), expected);
+    assert.deepEqual(taskRunnerInvocation(command, { atProjectRoot: true }), { ...expected, atProjectRoot: true });
+    for (const extra of [' other', '\n echo ignored', ' # comment']) {
+      assert.deepEqual(taskRunnerInvocation(command + extra, { atProjectRoot: true }), expected);
+    }
+  }
+});
+
+test('호스트 CI에서 루트의 단일 npm 작업 호출에만 루트 근거를 남긴다', async (t) => {
+  const host = { 'runs-on': 'windows-latest' };
+  const testStep = { run: 'npm test' };
+  const checkout = { uses: 'actions/checkout@v7' };
+  const root = await fixture(t, {
+    '.github/workflows/default.yml': { jobs: { implicit: { ...host, steps: [testStep] } } },
+    '.github/workflows/scoped.yml': {
+      defaults: { run: { 'working-directory': './', shell: 'pwsh' } },
+      jobs: {
+        root: { ...host, steps: [
+          { ...checkout, with: { path: '.' } },
+          { run: 'npm.cmd run-script check' },
+          { run: 'npm ci --ignore-scripts' },
+          { run: 'npm run check -- ' + PRIVATE },
+          { run: 'npm test\n echo ' + PRIVATE },
+          { run: 'npm test && echo ' + PRIVATE },
+          { ...testStep, 'working-directory': './' + PRIVATE },
+          { ...testStep, 'working-directory': '\u0024{{ inputs.' + PRIVATE + ' }}' },
+          { ...testStep, shell: 'wsl bash {0}' },
+        ] },
+        nonroot: { ...host, defaults: { run: { 'working-directory': './app' } }, steps: [
+          testStep,
+          { run: 'npm.exe run check', 'working-directory': '.' },
+        ] },
+        container: { 'runs-on': 'ubuntu-latest', container: 'node:24', steps: [testStep] },
+        relocated: { ...host, steps: [{ ...checkout, with: { path: PRIVATE } }, testStep] },
+        dynamic: { ...host, steps: [{ ...checkout, with: { path: '\u0024{{ inputs.path }}' } }, testStep] },
+        external: { ...host, steps: [{ ...checkout, with: { repository: 'example/other' } }, testStep] },
+      },
+    },
+    '.github/workflows/overrides.yml': {
+      defaults: { run: { 'working-directory': './' + PRIVATE } },
+      jobs: {
+        inherited: { ...host, steps: [testStep] },
+        overridden: { ...host, defaults: { run: { 'working-directory': '.' } }, steps: [checkout, testStep] },
+      },
+    },
+    app: null,
+  });
+  const project = await analyzeProject(root);
+  const { ci, taskRunnerCI } = project.metadata;
+  const scopedWorkflow = ci.find((entry) => entry.source === '.github/workflows/scoped.yml');
+  assert.deepEqual(scopedWorkflow.jobs.find((job) => job.id === 'nonroot').workingDirectory, { state: 'required', value: './app' });
+  assert.deepEqual(taskRunnerCI.map(({ job, step, atProjectRoot }) => [job, step, atProjectRoot]), [
+    ['implicit', 0, true],
+    ['inherited', 0, undefined], ['overridden', 1, true],
+    ['root', 1, true], ['root', 2, undefined], ['root', 3, undefined], ['root', 4, undefined], ['root', 5, undefined],
+    ['root', 6, undefined], ['root', 7, undefined], ['root', 8, undefined],
+    ['nonroot', 0, undefined], ['nonroot', 1, true],
+    ['container', 0, undefined], ['relocated', 1, undefined], ['dynamic', 1, undefined], ['external', 1, undefined],
+  ]);
+  assert.deepEqual(taskRunnerCI.find(({ kind }) => kind === 'dependency_install'), {
+    source: '.github/workflows/scoped.yml', job: 'root', step: 2, tool: 'npm',
+    state: 'declared', kind: 'dependency_install', executionLocation: 'host',
+  });
+  assert.deepEqual(taskRunnerCI.find(({ job, step }) => job === 'nonroot' && step === 0), {
+    source: '.github/workflows/scoped.yml', job: 'nonroot', step: 0, tool: 'npm',
+    state: 'declared', task: 'test', executionLocation: 'host',
+  });
+  for (const step of [3, 4, 5]) {
+    const entry = taskRunnerCI.find((entry) => entry.job === 'root' && entry.step === step);
+    assert.equal(entry.state, step === 5 ? 'unknown' : 'declared');
+    assert.equal(entry.task, step === 3 ? 'check' : 'test');
+  }
+  clean(project);
+  const nested = await analyzeProject(path.join(root, 'app'));
+  assert.equal(nested.metadata.taskRunnerCI.length, taskRunnerCI.length);
+  assert.ok(nested.metadata.taskRunnerCI.every((entry) => !Object.hasOwn(entry, 'atProjectRoot')));
+});
+
+const checkout = { uses: 'actions/checkout@v4' };
+const hostJob = (steps, context = {}) => ({ 'runs-on': 'windows-latest', steps, ...context });
+const runSteps = (...commands) => commands.map((run) => ({ run }));
+
+test('동일한 직접 명령의 최대 공통 구간과 실행기 준비 위치만 CI 근거로 남긴다', async (t) => {
+  const first = '.github/workflows/first.yml', second = '.github/workflows/second.yaml';
+  const commands = [
+    'node --check "' + PRIVATE + ' path.mjs"', 'python -m unittest discover', 'go test ./...',
+    'cargo check --locked', 'zig build test', 'dotnet build App.sln --no-restore',
+  ];
+  const root = await fixture(t, {
+    [first]: { jobs: { verify: hostJob([
+      { uses: 'go-task/setup-task@v1', with: { 'github-token': PRIVATE } },
+      { ...checkout, with: { path: './' } },
+      { uses: 'extractions/setup-just@v3' },
+      { run: 'choco install make --yes', env: { API_TOKEN: PRIVATE } },
+      { run: 'cargo build' },
+      ...runSteps(...commands),
+      { run: 'go build ./...' },
+    ]) } },
+    [second]: { defaults: { run: { 'working-directory': './app' } }, jobs: { verify: hostJob([
+      checkout, { run: 'scoop install make' }, { run: 'go vet ./...' },
+      ...runSteps(...commands.map((command) => '  ' + command + '\r\n')),
+      { uses: 'go-task/setup-task@v1' },
+    ], { defaults: { run: { 'working-directory': '.', shell: 'pwsh' } } }) } },
+  });
+  const project = await analyzeProject(root);
+  assert.deepEqual(project.metadata.taskRunnerWorkflows, [{
+    jobs: [
+      { source: first, job: 'verify', steps: [5, 6, 7, 8, 9, 10] },
+      { source: second, job: 'verify', steps: [3, 4, 5, 6, 7, 8] },
+    ],
+    operations: [
+      { language: 'node', operation: 'check' }, { language: 'python', operation: 'test' },
+      { language: 'go', operation: 'test' }, { language: 'rust', operation: 'check' },
+      { language: 'zig', operation: 'test' }, { language: 'dotnet', operation: 'build' },
+    ],
+    prepared: [
+      { tool: 'task', source: first, job: 'verify', step: 0 },
+      { tool: 'just', source: first, job: 'verify', step: 2 },
+      { tool: 'make', source: first, job: 'verify', step: 3 },
+      { tool: 'make', source: second, job: 'verify', step: 1 },
+    ],
+  }]);
+  clean(project);
+});
+
+test('순서·명령 인수가 다르거나 단계 사이에 다른 명령이 있으면 같은 절차로 세지 않는다', async (t) => {
+  const step = { run: 'node --check first.mjs' }, next = { run: 'go test ./...' };
+  const jobs = {
+    once: hostJob([checkout, step, next, { run: 'npm ci' }, step, next]),
+    reversed: hostJob([checkout, next, step]),
+    different: hostJob([checkout, { run: 'node --check second.mjs' }, next]),
+    whitespace: hostJob([checkout, { run: 'node  --check first.mjs' }, next]),
+  };
+  for (const [index, intervening] of [
+    { run: 'npm ci' }, { run: 'make check' }, { run: 'cargo install just' },
+    { run: 'node --test && go test ./...' }, { run: 'go build ./...\nnode --test' },
+    { run: 'python -c "print(123)"' }, { run: 'node --test --eval=123' },
+    { run: 'dotnet test \u0024{{ inputs.path }}' }, { run: 'go test ./...', if: 'success()' },
+  ].entries()) {
+    for (const suffix of ['a', 'b']) jobs['interrupted' + index + suffix] = hostJob([checkout, step, intervening, next]);
+  }
+  const root = await fixture(t, { '.github/workflows/near.yml': { jobs } });
+  assert.deepEqual((await analyzeProject(root)).metadata.taskRunnerWorkflows, []);
+});
+
+test('반복 절차는 저장소 루트에서 선행 기본 checkout과 정적인 호스트 작업 문맥을 요구한다', async (t) => {
+  const steps = runSteps('node --test', 'go test ./...');
+  const checkedOut = [checkout, ...steps];
+  const root = await fixture(t, {
+    '.github/workflows/contexts.yml': { jobs: {
+      eligible: hostJob(checkedOut),
+      omitted: hostJob(steps),
+      late: hostJob([...steps, checkout]),
+      conditional: hostJob([{ ...checkout, if: 'success()' }, ...steps]),
+      nonliteral: hostJob([{ uses: 'actions/checkout@\u0024{{ inputs.checkout }}' }, ...steps]),
+      relocated: hostJob([{ ...checkout, with: { path: './app' } }, ...steps]),
+      external: hostJob([{ ...checkout, with: { repository: 'elsewhere/project' } }, ...steps]),
+      dynamic: hostJob(checkedOut, { 'runs-on': '\u0024{{ matrix.os }}' }),
+      container: hostJob(checkedOut, { container: 'node:24' }),
+      reusable: hostJob(checkedOut, { uses: 'elsewhere/project/.github/workflows/check.yml@v1' }),
+      directory: hostJob(checkedOut, { defaults: { run: { 'working-directory': './app' } } }),
+      shell: hostJob(checkedOut, { defaults: { run: { shell: 'wsl bash {0}' } } }),
+    } },
+    'app/package.json': { workspaces: ['packages/*'] },
+    'app/.github/workflows/misplaced.yml': { jobs: { one: hostJob(checkedOut), two: hostJob(checkedOut) } },
+  });
+  for (const target of [root, path.join(root, 'app')]) {
+    assert.deepEqual((await analyzeProject(target)).metadata.taskRunnerWorkflows, []);
+  }
+});
+
+test('컴파일 산출물을 나중 링크에 넘기는 경우에만 파일 의존 근거를 표시한다', async (t) => {
+  const compile = 'gcc -c "src/' + PRIVATE + ' input.c" -o "obj/' + PRIVATE + ' output.o"';
+  const link = 'clang "./obj/' + PRIVATE + ' output.o" -o app';
+  for (const [label, commands, expected] of [
+    ['같은 산출물', [compile, 'node --test', link], true],
+    ['다른 산출물', [compile, link.replace('output.o', 'other.o')], undefined],
+    ['링크가 먼저인 절차', [link, compile], undefined],
+  ]) {
+    await t.test(label, async (t) => {
+      const steps = [checkout, { run: 'choco install make -y' }, ...runSteps(...commands)];
+      const root = await fixture(t, { '.github/workflows/native.yml': { jobs: { build: hostJob(steps), verify: hostJob(steps) } } });
+      const project = await analyzeProject(root);
+      const [record] = project.metadata.taskRunnerWorkflows;
+      assert.deepEqual(record.operations.filter(({ language }) => language === 'native').map(({ operation }) => operation),
+        label === '링크가 먼저인 절차' ? ['link', 'compile'] : ['compile', 'link']);
+      assert.equal(record.fileDependency, expected);
+      assert.equal(record.prepared.length, 2);
+      clean(project);
+    });
+  }
+});
+
+test('루트의 정확한 도구 버전 선언과 확정한 로컬 언어만 정책 근거로 남긴다', async (t) => {
+  const taskPin = '3.54.0+private-pin-marker';
+  const root = await fixture(t, {
+    '.mise.toml': '[tools]\n"aqua:go-task/task" = { version = "' + taskPin + '" }\nmake = "latest"\n',
+    'mise.toml': '[tools]\n"aqua:casey/just" = ["1.52.0"]\nmake = "4.4.1"\n',
+    '.tool-versions': 'just 1.52.0\njust system\nmake 4.4.1\ntask ref:' + PRIVATE + '\n',
+    'package.json': { name: 'project' },
+    'go.mod': 'module example.com/project\n\ngo 1.25.0\n',
+    'pyproject.toml': '[project]\nrequires-python = "unrecognized"\n',
+    '.github/workflows/setup.yml': { jobs: { onlyCI: hostJob([{ uses: 'mlugg/setup-zig@v2', with: { version: '0.15.2' } }]) } },
+    app: null,
+  });
+  const project = await analyzeProject(root);
+  assert.deepEqual(project.metadata.taskRunnerPreferences, [
+    { tool: 'task', source: '.mise.toml' }, { tool: 'make', source: '.tool-versions' }, { tool: 'just', source: 'mise.toml' },
+  ]);
+  assert.ok(!JSON.stringify(project).includes(taskPin));
+  assert.deepEqual(project.metadata.taskRunnerLanguages.toSorted(), ['go', 'node']);
+  assert.equal(project.requirements.python.state, 'unknown');
+  assert.equal(project.requirements.zig.state, 'required');
+  const nested = await analyzeProject(path.join(root, 'app'));
+  assert.deepEqual(nested.metadata.taskRunnerPreferences, []);
+  clean(project);
+  clean(nested);
 });
 
 test('작업·동적 계산·include·CI를 두 번 분석해도 실행과 파일 변경이 없다', async (t) => {
