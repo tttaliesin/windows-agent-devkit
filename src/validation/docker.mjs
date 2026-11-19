@@ -28,6 +28,7 @@ async function reconcileDocker(entry, { docker, owner, name, projectName, mutati
   const observed = new Set(), removed = new Set();
   const filter = `label=${projectName ? 'com.docker.compose.project' : LABEL}=${owner}`;
   const uncertain = () => mutations.some((item) => item.state === 'timed_out' || item.operation?.settled === false);
+  const startupUncertain = uncertain();
   const pending = () => mutations.some((item) => item.operation?.settled === false);
   const run = (args) => docker(args, Math.max(1, Math.min(500, deadline - Date.now())));
   const ids = (response) => {
@@ -50,6 +51,7 @@ async function reconcileDocker(entry, { docker, owner, name, projectName, mutati
     let changed = false;
     for (const id of candidates) {
       const target = container((await run(['inspect', id])).stdout);
+      if (!target?.Id) continue;
       if (!owned(target, owner) || (projectName && target.Config.Labels['com.docker.compose.project'] !== projectName)) { foreign = true; continue; }
       observed.add(id);
       const response = await run(['rm', '--force', id]); mutations.push(response);
@@ -58,25 +60,29 @@ async function reconcileDocker(entry, { docker, owner, name, projectName, mutati
     const networks = projectName ? ids(await run(['network', 'ls', '--no-trunc', '--filter', filter, '--format', '{{.ID}}'])) : [];
     for (const id of networks ?? []) {
       const network = container((await run(['network', 'inspect', id])).stdout);
-      if (network?.Labels?.['com.docker.compose.project'] !== projectName || !network.Name?.startsWith(`${projectName}_`) || network.Id !== id) { foreign = true; continue; }
+      if (!network?.Id) continue;
+      if (network.Labels?.['com.docker.compose.project'] !== projectName || !network.Name?.startsWith(`${projectName}_`) || network.Id !== id) { foreign = true; continue; }
       observed.add(id);
       const response = await run(['network', 'rm', id]); mutations.push(response);
       if (ok(response)) { removed.add(id); changed = true; }
     }
     remaining = [...(containers ?? []), ...(networks ?? [])].filter((id) => !removed.has(id));
     absenceConfirmed = containers !== null && networks !== null && !containers.length && !networks.length && !candidates.size;
-    if (!uncertain() && (absenceConfirmed || foreign)) break;
+    // A timed-out deletion can finish on the engine. Only uncertain startup can create resources after an empty listing.
+    if (!startupUncertain && (foreign || (absenceConfirmed && !pending()))) break;
     if (!changed) await pause(Math.min(50, Math.max(1, deadline - Date.now())));
   } while (Date.now() < deadline);
-  const confirmed = absenceConfirmed && !foreign && !uncertain();
-  const facts = { absenceConfirmed, pendingClient: pending(), remoteCompletionUncertain: uncertain(), observedIds: [...observed], removedIds: [...removed] };
+  const pendingClient = pending();
+  const confirmed = absenceConfirmed && !foreign && !startupUncertain && !pendingClient;
+  const remoteCompletionUncertain = startupUncertain || pendingClient || (!absenceConfirmed && uncertain());
+  const facts = { absenceConfirmed, pendingClient, remoteCompletionUncertain, observedIds: [...observed], removedIds: confirmed ? [...observed] : [...removed] };
   if (!confirmed) {
     (entry.recovery ??= []).push({ kind: projectName ? 'docker-compose' : 'docker-container',
       dockerContext: entry.scope.dockerContext, endpoint: entry.endpoint, ...(name ? { name } : { projectName }),
       labels: { [LABEL]: owner, ...(projectName ? { 'com.docker.compose.project': projectName } : {}) },
       remainingIds: remaining, ...facts });
   }
-  step(entry, phase, confirmed ? 'pass' : 'unknown', confirmed ? 'owned_resources_removed' : pending() ? 'query_pending_cleanup_uncertain' : 'cleanup_unverified',
+  step(entry, phase, confirmed ? 'pass' : 'unknown', confirmed ? 'owned_resources_removed' : pendingClient ? 'query_pending_cleanup_uncertain' : 'cleanup_unverified',
     confirmed ? '소유권을 확인한 시험 자원만 정리하고 남은 자원이 없음을 조회했습니다.' : '제한된 정리 재조회 이후에도 종료 확정 근거가 부족해 복구 식별자를 남겼습니다.', facts);
 }
 
