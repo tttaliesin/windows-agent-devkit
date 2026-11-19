@@ -1,7 +1,45 @@
 # 구현 검증 기록
 
 이 문서는 버전별 자동 검사와 실제 호스트·앱 관찰을 구분합니다.
-최신 검증 기준일은 2026-11-18입니다.
+최신 검증 기준일은 2026-11-19입니다.
+
+## 0.3.5 작업 실행기 권장 판정
+
+Codex 데스크톱 앱 26.1111.2228.0에서 Windows Agent Devkit 0.3.5의 설치와 활성화를 확인했습니다.
+앱 대화에서 설치한 Doctor 스킬의 CLI를 실행했습니다.
+설치본과 소스에서 빌드한 CLI의 SHA-256은 `3E739E5A119D3FC4C00EFB3ABA273C21A2FA0639009D44B9C378F6B82924707B`로 일치했습니다.
+
+이 저장소에서 `doctor --app`은 종료 코드 0과 `CODEX-01: pass`를 반환했습니다.
+Doctor는 CI의 `build`, `test`, `check`, `package` 호출을 루트 `package.json`과 연결했습니다.
+작업 실행기 판정은 `keep`이었고 텍스트 보고서에는 `기존 npm scripts 유지`가 표시됐습니다.
+
+### 도입 제안과 판단 보류
+
+설치한 CLI로 두 GitHub Actions 작업이 같은 절차를 선언한 테스트 프로젝트를 점검했습니다.
+도입 조건을 충족한 다섯 사례는 `suggest`를 반환했습니다.
+아래 대조 사례에서 조건을 하나씩 바꾸자 모두 `defer`를 반환했습니다.
+열 건의 CLI 종료 코드는 모두 0이었으며 실제 프로젝트 작업은 실행하지 않았습니다.
+
+| 실행기 | 도입 제안 근거 | 판단 보류 대조 |
+| --- | --- | --- |
+| mise tasks | 로컬에 Node.js와 Go가 선언되어 있고 CI가 두 언어의 검사를 반복 | `go.mod` 제거 |
+| Go Task | 반복 절차를 선언한 두 CI 작업이 모두 Go Task를 준비 | 한 작업의 준비 단계 제거 |
+| just | 루트 `.tool-versions`에 just 버전을 고정 | just 버전 고정 제거 |
+| GNU Make | CI가 GNU Make를 준비하고 링크 단계가 앞서 컴파일한 `main.o`를 사용 | 링크 입력을 `other.o`로 변경 |
+| npm scripts | Node.js 전용 절차가 반복되고 루트에 `package-lock.json`이 있음 | `package-lock.json` 제거 |
+
+`node --test test/task-runner-report.test.mjs test/task-runners.test.mjs`로 판정과 대조 조건을 재검사할 수 있습니다.
+자동 판정의 적용 범위는 [작업 실행기 가이드](task-runners.md#자동-판정-기준)에 기록합니다.
+
+### 권한과 로컬 검사
+
+Doctor 호출에는 앱 대화의 기본 권한을 사용했습니다.
+플러그인 설치 직전과 직후의 Codex 사용자 설정값과 프로젝트 규칙은 일치했습니다.
+같은 대화의 샌드박스와 승인 정책은 `workspace-write`, `on-request`, `auto_review`로 일치했습니다.
+
+로컬 `node --test`는 409개 중 404개 통과와 실패 0개를 기록했습니다.
+Windows 파일 심볼릭 링크 권한이 필요한 네 검사와 별도로 켜는 실제 WSL 실행기 검사 한 개를 생략했습니다.
+플러그인 소스 검사와 설치 패키지의 독립 실행 검사도 통과했습니다.
 
 ## 0.3.3 프로젝트별 WSL 고정 실행기
 

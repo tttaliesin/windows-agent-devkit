@@ -1,3 +1,5 @@
+import { decideTaskRunners } from './task-runner-policy.mjs';
+
 const EXECUTABLE_RUNNERS = new Set(['mise', 'task', 'just', 'make']);
 const VERSION_PATTERNS = {
   mise: /^(?:mise )?(\d+\.\d+\.\d+)(?:\s|$)/,
@@ -10,22 +12,17 @@ const VERSION_PATTERNS = {
 export function summarizeTaskRunners(project) {
   const declarations = project.metadata?.taskRunners ?? [];
   const ci = project.metadata?.taskRunnerCI ?? [];
-  const observed = [...new Set([...declarations, ...ci].map((item) => item.tool))];
-  const uncertain = declarations.some((item) => item.state === 'unknown') || ci.some((item) => item.state === 'unknown');
-  const mise = declarations.some((item) => item.tool === 'mise' && item.state === 'declared' && item.tasks.length > 0);
-  const different = observed.some((tool) => tool !== 'mise');
-  const status = uncertain ? 'unknown' : mise ? 'aligned' : different ? 'different' : 'unknown';
+  const ciTasks = ci.filter((item) => item.kind === undefined);
+  const observed = [...new Set([...declarations, ...ciTasks].map((item) => item.tool))];
+  const recommendation = decideTaskRunners(project, declarations, ciTasks);
+  const recommended = recommendation.tools.length === 1 ? recommendation.tools[0] : null;
   return {
-    recommended: 'mise', declarations, ci, tools: [],
-    recommendation: {
-      status, expected: 'mise tasks', observed,
-      reason: uncertain ? 'static_analysis_incomplete' : mise ? 'mise_tasks_declared' : different ? 'existing_runner_preserved' : observed.includes('mise') ? 'mise_task_scope_unverified' : 'task_entrypoint_not_declared',
-      application: 'new_polyglot_project_default',
-    },
+    recommended, declarations, ci, tools: [],
+    recommendation: { ...recommendation, observed },
     proposal: {
-      changes: ['새 다중 언어 프로젝트의 기본 후보로 mise tasks를 제안합니다.', '기존 실행기와 다르면 기존 명령을 보존하는 전환안 또는 유지 사유를 제시합니다.'],
+      changes: recommendation.action === 'suggest' ? [recommendation.message] : [],
       preserve: ['프로젝트 지정 런타임', '패키지 관리자와 잠금 파일', '기존 작업 정의와 빌드·테스트 명령', 'CI와 배포 경로'],
-      verify: ['Windows·WSL 실행 문맥과 작업 내부 셸 확인', '선택한 작업만 validate --execute로 실행', 'mise 검증 중 자동 설치 비활성화'],
+      verify: ['Windows·WSL 실행 문맥과 작업 내부 셸 확인', '선택한 작업만 validate --execute로 실행'],
       exception: '기존 Task·just·Make·npm scripts를 유지할 이유와 범위를 기록할 수 있습니다.',
     },
     limitations: ['작업 정의의 정적 탐지는 실행 성공을 뜻하지 않습니다.', '외부 포함과 동적 작업 정의는 지원 범위에 따라 미확인으로 남깁니다.', '목록·dry-run 명령도 프로젝트 설정을 평가할 수 있어 기본 진단에서 실행하지 않습니다.'],

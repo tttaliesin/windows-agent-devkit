@@ -36,7 +36,10 @@ Node.js 24 이상과 PowerShell 7을 실행 기준으로 사용합니다.
 | `workspaces[]` | `source`, `kind`, `state`, `patterns`, `members`, `notes`, 선택적 `root`입니다. |
 | `ci[]` | `source`, `provider`, `state`, `jobs`, `notes`입니다. |
 | `taskRunners[]` | `tool`, `source`, `state`, `tasks`, `notes`와 선택적 `taskDetails`입니다. |
-| `taskRunnerCI[]` | `source`, `job`, `step`, `tool`, `state`, 선택적 `task`, `executionLocation`입니다. |
+| `taskRunnerCI[]` | `source`, `job`, `step`, `tool`, `state`, `executionLocation`과 선택적 `task`, `atProjectRoot`, `kind`입니다. |
+| `taskRunnerWorkflows[]` | 반복된 정적 절차의 `jobs`, `operations`, `prepared`와 선택적 `fileDependency`입니다. |
+| `taskRunnerPreferences[]` | 루트의 정적 실행기 버전 선택을 확인한 `tool`과 `source`입니다. |
+| `taskRunnerLanguages[]` | 로컬 프로젝트 선언으로 확인한 언어 계열입니다. |
 | `processCompose` | `source`, `sources`, `services`, `dynamicEnvironment`, `configurations`, 선택적 `shell`입니다. |
 | `compose` | `sources`, `services`, `dynamicEnvironment`, `configurations`입니다. |
 | `devcontainer` | 있는 경우 `source`, `runtimeLocation`, `configurations`, 선택적 `composeFiles`입니다. |
@@ -287,14 +290,19 @@ stateDiagram-v2
 `metadata.taskRunners`는 mise tasks·Taskfile·Justfile·Makefile·npm scripts의 정적 선언 배열입니다.
 각 `state`는 `declared | unknown`입니다.
 `tasks`에는 정적으로 확인한 작업 이름만 포함합니다.
+`taskRunnerCI.kind`로 의존성 설치, 실행기 준비, 버전 확인을 작업 호출과 구분합니다.
 선택적 `taskDetails`는 `{name, shell?, directory?, environmentKeys?, dependencies?}`입니다.
 셸에는 알려진 실행 파일과 인수만 기록합니다.
 원시 작업 명령과 환경 변수 값은 포함하지 않습니다.
 포함 파일·파일 작업·동적 계산의 미지원 의미는 `unknown`과 사유로 남깁니다.
 
 `report.taskRunners`는 `recommended`, `declarations`, `ci`, `tools`, `recommendation`, `proposal`, `limitations`입니다.
-`recommended`는 `mise`입니다.
-권장 적용 범위는 새 다중 언어 프로젝트의 기본 후보입니다.
+`recommended`는 한 실행기를 선택한 경우의 `mise | task | just | make | npm` 또는 `null`입니다.
+여러 기존 실행기를 유지하는 경우와 판단 보류에는 `null`을 사용합니다.
+`recommendation.action`은 `keep | suggest | defer`입니다.
+`recommendation.tools`에는 판정에 해당하는 실행기를 배열로 기록합니다.
+`recommendation.evidence`에는 근거가 된 선언·CI 위치·도구 선택을 기록합니다.
+CI 단계 번호는 JSON에서 0부터 시작합니다.
 기존 실행기는 자동 변환하지 않습니다.
 `recommendation.status`는 `aligned | different | unknown`입니다.
 이 판정은 프로젝트 작업의 실행 성공과 별도입니다.

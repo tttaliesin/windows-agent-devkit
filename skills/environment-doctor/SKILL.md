@@ -56,6 +56,8 @@ Nushell은 선택 도구입니다.
 
 신규 다중언어 프로젝트의 작업 실행기는 mise tasks를 기본 권장합니다.
 기존 Task·just·Make·npm scripts에는 권장 차이와 전환안 또는 유지 사유를 설명합니다.
+`taskRunners.recommendation.action`의 유지·신규 제안·판단 보류를 보고합니다.
+`evidence`에서 확인된 프로젝트 선언과 CI 위치를 근거로 설명합니다.
 실행기 셸·작업 경로·실행 경로·요구·권장 차이는 SH-01·ENV-02·PATH-01·REQ-01·RCM-01의 기존 근거에 연결합니다.
 새 check ID와 필수 실행기·hook·마이그레이션을 추가하지 않습니다.
 
