@@ -5,12 +5,10 @@ import { evaluateVersion } from './versions.mjs';
 import { createQuery } from './query.mjs';
 import { collectAdvanced } from './advanced.mjs';
 import { collectInfrastructure } from './infrastructure.mjs';
-import { validateEnvironment } from './validation.mjs';
 import { enhanceRuntimes } from './runtime.mjs';
 import { attachSupport } from './support.mjs';
-import { loadExceptions } from './configure.mjs';
+import { loadExceptions } from './exceptions.mjs';
 import { checkApp } from './app-check.mjs';
-import { runProjectTask } from './task.mjs';
 import { summarizeTaskRunners, collectTaskRunnerTools, attachTaskRunnerChecks } from './task-runner-checks.mjs';
 
 export const VERSION = '0.3.5';
@@ -19,6 +17,46 @@ export const P1_IDS = ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02', 'IDE-01', 'CODEX-
 const LANGUAGE_TOOLS = { node: 'node', python: 'python', go: 'go', rust: 'rustc', zig: 'zig', dotnet: 'dotnet' };
 const LANGUAGE_CHECKS = { node: 'NODE-01', python: 'PY-01', go: 'GO-01', rust: 'RUST-01', zig: 'ZIG-01', dotnet: 'DOTNET-01' };
 const LABELS = { node: 'Node.js', python: 'Python', go: 'Go', rust: 'Rust', zig: 'Zig', dotnet: '.NET SDK' };
+const VERSION_ARGS = {
+  node: ['--version'], python: ['--version'], go: ['version'],
+  rust: ['--version'], zig: ['version'], dotnet: ['--list-sdks'],
+};
+const RUNNER_ARGS = new Map([['npm', ['run']], ['mise', ['run']], ['task', []], ['just', []], ['make', []]]);
+const MANUAL_CHECKS = {
+  'RUST-02': 'Rust 링크 확인에는 프로젝트의 기존 빌드 명령을 사용합니다.',
+  'WSL-02': '배포판 내부에서는 그 문맥의 도구 버전과 프로젝트 확인 명령을 사용합니다.',
+  'CTR-02': 'Docker 연결과 서비스 상태는 해당 프로젝트의 확인 명령으로 확인합니다.',
+  'PC-02': '서비스 상태는 해당 프로젝트의 Process Compose 확인 명령으로 확인합니다.',
+};
+
+function commandGuidance(project, runners, { wsl, containers, processCompose }) {
+  const commands = [];
+  for (const [language, requirement] of Object.entries(project.requirements)) {
+    if (requirement.state === 'required') {
+      commands.push({ tool: LANGUAGE_TOOLS[language], args: [...VERSION_ARGS[language]], description: `${LABELS[language]} 선택 버전 확인` });
+    }
+  }
+  if (wsl) commands.push({ tool: 'wsl', args: ['--list', '--verbose'], description: '등록된 배포판과 WSL 버전 확인' });
+  if (containers || project.environment.containers !== 'not_required') {
+    commands.push({ tool: 'docker', args: ['version'], description: '현재 Docker 문맥의 클라이언트와 엔진 버전 확인' });
+    if (project.files.some((file) => /^(?:docker-)?compose\.ya?ml$/i.test(file))) {
+      commands.push({ tool: 'docker', args: ['compose', 'ps'], description: '프로젝트 루트에서 기존 Compose 서비스 상태 확인' });
+    }
+  }
+  if (processCompose || project.environment.processCompose !== 'not_required') {
+    commands.push({ tool: 'Get-Command', args: ['process-compose'], description: 'PowerShell에서 Process Compose 명령의 경로 확인' });
+  }
+  const seen = new Set();
+  for (const { tool, task, definitions } of runners.recommendation.evidence.ci ?? []) {
+    const prefix = RUNNER_ARGS.get(tool);
+    const key = `${tool} ${task}`;
+    const checkTask = typeof task === 'string' && /^(?:build|check|lint|test|verify)(?:[._:-][a-z0-9._:-]{1,120})?$/i.test(task);
+    if (!prefix || !definitions?.length || !checkTask || seen.has(key)) continue;
+    seen.add(key);
+    commands.push({ tool, args: [...prefix, task], description: '프로젝트 루트 선언과 CI에서 확인한 기존 작업' });
+  }
+  return commands;
+}
 
 function summarizeChecks(checks) {
   const summary = { pass: 0, fail: 0, warn: 0, unknown: 0, skipped: 0 };
@@ -150,51 +188,55 @@ export function buildReport(project, host, options = {}) {
   const comparisons = [{ role: 'Windows 진단 셸', expected: 'PowerShell 7.6 LTS', observed: shell?.version ?? null, status: shellAlignment }];
   if (runtimeRequired) comparisons.push({ role: '개발 도구 관리', expected: 'mise; .NET SDK 공식 설치 예외', observed: candidates(host, 'mise'), status: discovered(host, 'mise') ? 'unknown' : 'different' });
   const different = comparisons.some((item) => item.status === 'different');
-  checks.push(result('RCM-01', different ? 'warn' : comparisons.some((item) => item.status === 'unknown') ? 'unknown' : 'pass', 'recommendation_compared', '권장 구성과 실행 요구를 별도로 비교합니다. 기존 도구를 유지하는 선택은 전환안의 예외로 기록할 수 있습니다.', {
+  checks.push(result('RCM-01', different ? 'warn' : comparisons.some((item) => item.status === 'unknown') ? 'unknown' : 'pass', 'recommendation_compared', '프로젝트 요구와 권장 구성을 비교하고 기존 도구를 유지할 근거를 안내합니다.', {
     observed: comparisons, recommendation: { status: different ? 'different' : comparisons.some((item) => item.status === 'unknown') ? 'unknown' : 'aligned' },
-    proposal: { changes: ['차이가 확인된 역할은 권장 도구의 경로·버전 선택과 업데이트 책임을 검토합니다.'], preserve: ['프로젝트 지정 런타임', '패키지 관리자와 잠금 파일', '빌드·테스트 명령과 CI'], verify: ['전환 후 실제 실행 경로와 버전 확인', '기존 개발 명령 실행은 요청 범위에서 별도 검증'], rollback: ['변경 전 도구 경로·프로필·버전 선언으로 복구'], exception: '기업 정책·프로젝트 요구·사용자 선택의 이유와 범위를 기록합니다.' },
-    nextAction: '미확인한 설치 이력과 활성화를 확인해 전환안을 구체화합니다. 이 진단은 전환을 적용하지 않습니다.',
+    proposal: { changes: ['차이가 확인된 역할은 권장 도구의 경로·버전 선택과 업데이트 책임을 검토합니다.'], preserve: ['프로젝트 지정 런타임', '패키지 관리자와 잠금 파일', '빌드·테스트 명령과 CI'], verify: ['현재 실행 파일의 경로와 버전을 확인합니다.', '프로젝트의 확인 명령은 안내된 문맥에서 사용합니다.'] },
+    nextAction: '미확인한 설치 이력과 활성화 상태를 확인하고 필요한 역할의 선택 근거를 검토합니다.',
   }));
   checks.sort((left, right) => P0_IDS.indexOf(left.checkId) - P0_IDS.indexOf(right.checkId));
   const summary = summarizeChecks(checks);
   return { schemaVersion: 1, pluginVersion: VERSION, policyVersion: '2026-11-17', generatedAt: new Date().toISOString(), context: host.context, project: { root: project.root, files: project.files }, summary, checks, deferredChecks: P1_IDS, limitations: ['공식 지원 상태는 자동 조회하지 않아 unknown으로 기록합니다.', '지원하지 않는 선언과 버전 표현은 unknown으로 기록합니다.', '진단 셸의 관찰을 사용자 프로필이나 앱 터미널의 관찰로 일반화하지 않습니다.', '이 보고서는 전체 빌드·테스트와 앱에서의 플러그인 로딩 검증을 대신하지 않습니다.'] };
 }
 
-export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], wsl = false, containers = false, processCompose = false, native = false, inspect = inspectWindows, query: suppliedQuery, ...options } = {}) {
+export async function diagnose({
+  projectPath, timeoutMs = 5000, languages = [], wsl = false, containers = false, processCompose = false, native = false,
+  ide, storage, githubAuth, app, codexExecutable, stateDir, now, inspect = inspectWindows, query: suppliedQuery,
+} = {}) {
   const root = await realpath(projectPath ?? process.cwd());
   if (!(await stat(root)).isDirectory()) throw new Error('점검할 프로젝트 경로는 디렉터리여야 합니다.');
   const project = await analyzeProject(root);
   const active = Object.entries(effectiveRequirements(project, { languages, native })).filter(([, item]) => item.state === 'required').map(([name]) => LANGUAGE_TOOLS[name]);
-  const host = await inspect({ projectPath: root, timeoutMs, tools: ['git', ...active, ...(wsl || options.distro ? ['wsl'] : []), ...(containers || project.environment.containers === 'required' ? ['docker'] : [])] });
+  const host = await inspect({ projectPath: root, timeoutMs, tools: ['git', ...active, ...(wsl ? ['wsl'] : []), ...(containers || project.environment.containers === 'required' ? ['docker'] : [])] });
   const query = suppliedQuery ?? createQuery({ projectPath: root, host, timeoutMs });
   await enhanceRuntimes({ project, host, tools: active, query });
   const report = buildReport(project, host, { languages, wsl, containers, processCompose, native });
   const taskRunners = summarizeTaskRunners(project);
   const effective = { ...project, requirements: effectiveRequirements(project, { languages, native }), metadata: structuredClone(project.metadata ?? {}) };
-  if (options.ide) (effective.metadata.ide ??= {}).required = true;
-  if (options.storage) effective.metadata.storage = { requested: true, path: typeof options.storage === 'string' ? options.storage : root };
-  if (options.githubAuth) effective.metadata.auxiliary = { github: true, authentication: true };
-  const [advanced, infrastructure, validation, app, runnerTools] = await Promise.all([
+  if (ide) (effective.metadata.ide ??= {}).required = true;
+  if (storage) effective.metadata.storage = { requested: true, path: typeof storage === 'string' ? storage : root };
+  if (githubAuth) effective.metadata.auxiliary = { github: true, authentication: true };
+  const [advanced, infrastructure, appCheck, runnerTools] = await Promise.all([
     collectAdvanced({ projectPath: root, project: effective, host, timeoutMs, query }),
-    collectInfrastructure({ project: effective, host, options: { ...options, wsl, containers, processCompose }, query }),
-    validateEnvironment({ projectPath: root, project: effective, host, options: { ...options, timeoutMs }, query }),
-    checkApp({ query, enabled: options.app, executable: options.codexExecutable }),
-    collectTaskRunnerTools({ summary: taskRunners, host, query, selectedTool: options.task?.context === 'native' ? options.task.tool : undefined }),
+    collectInfrastructure({ project: effective, host, options: { wsl, containers, processCompose }, query }),
+    checkApp({ query, enabled: app, executable: codexExecutable }),
+    collectTaskRunnerTools({ summary: taskRunners, host, query }),
   ]);
   const map = new Map(report.checks.map((item) => [item.checkId, item]));
-  for (const item of [...advanced.checks, ...infrastructure.checks, ...validation.checks, app]) map.set(item.checkId, item);
+  for (const item of [...advanced.checks, ...infrastructure.checks, appCheck]) map.set(item.checkId, item);
+  for (const [id, nextAction] of Object.entries(MANUAL_CHECKS)) {
+    map.set(id, { ...skip(id, '실행 결과는 확인 명령 안내에 따라 별도로 확인합니다.'), reason: 'manual_confirmation', nextAction });
+  }
   const ids = [...P0_IDS, ...P1_IDS];
   report.checks = ids.map((id) => map.get(id));
-  attachSupport(report.checks, host, options.now);
+  attachSupport(report.checks, host, now);
   report.deferredChecks = [];
   report.project.scope = project.metadata?.scope;
   report.project.execution = project.metadata?.execution;
   const reqCheck = map.get('REQ-01');
   reqCheck.observed.scope = project.metadata?.scope ?? 'bounded static declarations';
   reqCheck.observed.execution = project.metadata?.execution;
-  report.validation = validation.evidence;
-  report.task = await runProjectTask({ projectPath: root, task: options.task, execute: options.execute, query, timeoutMs });
-  try { report.exceptions = await loadExceptions({ projectPath: root, stateDir: options.stateDir }); }
+  report.commandGuidance = commandGuidance(effective, taskRunners, { wsl, containers, processCompose });
+  try { report.exceptions = await loadExceptions(root, stateDir); }
   catch (error) { report.exceptions = { state: 'unknown', reason: error.code ?? 'exception_state_unreadable' }; }
   const recommendation = map.get('RCM-01');
   recommendation.observed = recommendation.observed.filter((i) => i.role !== '개발 도구 관리');
@@ -204,6 +246,6 @@ export async function diagnose({ projectPath, timeoutMs = 5000, languages = [], 
   taskRunners.tools = runnerTools;
   attachTaskRunnerChecks(report, taskRunners);
   report.summary = summarizeChecks(report.checks);
-  report.limitations = ['지원 정책은 2026-11-17의 오프라인 스냅샷이며 30일 후에는 미확인으로 처리합니다.', '지원 계열 판정은 최신 패치·취약점·모든 OS 지원 조합의 확인을 포함하지 않습니다.', '기본 진단은 프로젝트 명령·배포판 내부·컨테이너·서비스를 실행하지 않습니다.', '앱 설치 목록과 실제 Skill 호출의 관찰은 구분합니다.'];
+  report.limitations = ['지원 정책은 2026-11-17의 오프라인 스냅샷이며 30일 후에는 미확인으로 처리합니다.', '지원 계열 판정은 최신 패치·취약점·모든 OS 지원 조합의 확인을 포함하지 않습니다.', '확인 명령은 안내용입니다. 프로젝트 명령과 서비스는 사용자가 해당 문맥에서 확인합니다.', '앱 설치 목록과 실제 Skill 호출의 관찰은 구분합니다.'];
   return report;
 }

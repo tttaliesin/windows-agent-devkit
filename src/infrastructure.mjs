@@ -117,7 +117,7 @@ function pythonEnvironment(project, host) {
 
 export async function collectInfrastructure({ project, host, options = {}, query }) {
   const checks = [await nodeManager(project, host), pythonEnvironment(project, host)];
-  if (!options.wsl && options.distro === undefined) checks.push(skip('WSL-01', 'WSL 점검 대상이 선택되지 않았습니다.'));
+  if (!options.wsl) checks.push(skip('WSL-01', 'WSL 점검 대상이 선택되지 않았습니다.'));
   else {
     const q = host.probes?.wsl;
     const complete = q?.state === 'succeeded' && Boolean(q.version) && Array.isArray(q.data?.distributions);

@@ -1,7 +1,35 @@
 # 구현 검증 기록
 
-이 문서는 버전별 자동 검사와 실제 호스트·앱 관찰을 구분합니다.
-최신 검증 기준일은 2026-11-19입니다.
+이 문서는 플러그인의 자동 검사와 실제 호스트·앱에서 확인한 결과를 기록합니다.
+마지막으로 기록한 검증일은 2026-11-20입니다.
+
+설정 적용·실행 검증·Compose 정리·WSL 작업 등록의 이전 검증은 시험 시점의 구현을 대상으로 합니다.
+현재 사용법은 [진단 CLI 사용법](diagnostic-cli.md)에 있습니다.
+
+## 읽기 전용 0.3.5의 Codex 앱 검증
+
+2026-11-20에 Codex 데스크톱 앱에서 Windows Agent Devkit 0.3.5를 읽기 전용 패키지로 갱신했습니다.
+설치본의 파일 20개가 준비한 패키지와 SHA-256 기준으로 모두 일치했습니다.
+설치본의 `dist/cli.mjs` SHA-256은 `8420A9AAAE59A6D435D04ECC0A4A82C6150E026CA6A606BE4C891133B8E8F16B`였습니다.
+앱은 `windows-agent-devkit:environment-doctor` 스킬 하나를 활성 상태로 표시했습니다.
+매니페스트가 선언한 기능은 `Read`였습니다.
+
+| 대상과 명령 | 관찰 결과 | CLI 종료 코드 |
+| --- | --- | --- |
+| 이 저장소에서 `doctor --app --format json` | 30개 점검 항목을 반환했습니다. `CODEX-01`과 `NODE-01`은 `pass`였습니다. 작업 실행기는 기존 `npm scripts` 유지(`keep`)로 판정했습니다. `node --version`과 `npm run test`를 안내했습니다. | 0 |
+| Compose와 Process Compose를 선언한 테스트 프로젝트에서 `doctor --containers --process-compose --format json` | `docker compose ps`와 `npm run verify`를 안내했습니다. 로컬 Docker 클라이언트 점검은 `fail`이었습니다. 엔진은 `not_contacted`, 서비스 실행은 `not_run`이었습니다. | 1 |
+
+테스트 프로젝트에서 `RUST-02`, `WSL-02`, `CTR-02`, `PC-02`는 모두 `skipped`와 `not_run`을 반환했습니다.
+점검 전후에 테스트 프로젝트의 파일 해시가 일치했습니다.
+진단은 지정한 새 상태 경로와 작업 실행 표식 파일을 생성하지 않았습니다.
+
+| 이전 명령 또는 옵션 | 앱 설치본의 응답 | CLI 종료 코드 |
+| --- | --- | --- |
+| `validate --execute`, `apply --execute`, `wsl-register --execute` | 지원하지 않는 명령 | 2 |
+| `doctor --execute`, `doctor --output` | 지원하지 않는 옵션 | 2 |
+
+진단과 명령 거부 검증은 같은 앱 대화의 기본 샌드박스에서 설치본으로 수행했습니다.
+플러그인을 갱신하고 검증을 마친 뒤 비교한 Codex 설정과 허용 규칙의 파일 내용, 수정 시각, 접근 권한은 갱신 전과 일치했습니다.
 
 ## Docker Compose 정리 판정
 

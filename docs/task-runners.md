@@ -175,7 +175,7 @@ CI는 선택한 운영체제와 설치 환경에서 그 진입점 또는 기존 
 
 ```mermaid
 flowchart TB
-    Local["로컬 개발·선택 실행 검증"] --> Runner["mise tasks·Task·just·Make"]
+    Local["사용자의 로컬 개발"] --> Runner["mise tasks·Task·just·Make·npm scripts"]
     CI["기존 CI의 OS·도구 설치·권한"] --> Runner
     CI --> Lang["기존 npm scripts·언어 CLI"]
     Runner --> Lang
@@ -198,72 +198,37 @@ includes·import·원격 참조·동적 변수·템플릿·Make 함수 등 지�
 목록 조회나 dry run도 설정을 평가할 수 있습니다.
 `mise tasks ls`, `task --list`, `just --list`, `make -n`을 정적 진단의 대체 절차로 자동 실행하지 않습니다.
 mise는 작업 파일을 읽는 동안 템플릿을 평가할 수 있습니다. [mise 작업 발견과 신뢰](https://mise.jdx.dev/tasks/task-discovery.html)
-실제 명령 실행은 구체적으로 선택한 작업에 대한 `validate --execute`로 구분합니다.
+작업의 실제 동작은 사용자가 대상 프로젝트에서 해당 명령으로 확인합니다.
 
-| 연결할 기존 ID 또는 결과 | 실행기에서 설명할 근거 |
+| 기존 점검 ID | 실행기에서 설명할 근거 |
 | --- | --- |
 | SH-01 | 실행기 내부 셸과 대화형 셸의 구분 |
 | ENV-02 | 실행 문맥과 프로젝트 내부 작업 디렉터리 |
 | PATH-01 | 선택한 실행기와 하위 언어 CLI의 실행 경로 |
 | REQ-01 | 설정 파일·작업 이름·정적 요구와 해석의 한계 |
 | RCM-01 | 다섯 실행기의 유지·신규 제안·판단 보류 근거 |
-| 별도 `task` 결과 | 선택한 작업의 실행 상태·종료 코드·정리 근거 |
 
 기존 P0 22개와 P1 8개의 30개 check ID 계약을 보존합니다.
 실행기용 필수 ID를 추가하지 않습니다.
-정적 탐지의 통과와 별도 `task` 결과의 성공은 서로 다른 근거입니다.
 
-## 선택한 실행기의 작업 전달
+## 사용자가 직접 확인할 작업
 
-`--task-file`은 플러그인 JSON을 읽는 옵션입니다.
-Go Task의 Taskfile YAML을 전달하는 옵션이 아닙니다.
-다음은 프로젝트에 선언된 `check` 작업을 선택한 JSON 예시입니다.
+프로젝트 루트의 작업 선언과 CI 호출이 일치하면 `doctor`는 해당 작업을 수동 확인 명령으로 안내할 수 있습니다.
+아래 표는 확인한 작업 이름이 `check`인 경우입니다.
 
-```json
-{
-  "context": "native",
-  "trusted": true,
-  "tool": "mise",
-  "args": ["run", "check"],
-  "cwd": ".",
-  "env": {}
-}
-```
+| 실행기 | 직접 실행할 명령 | JSON의 `tool` | JSON의 `args` |
+| --- | --- | --- | --- |
+| mise tasks | `mise run check` | `mise` | `["run", "check"]` |
+| Go Task | `task check` | `task` | `["check"]` |
+| just | `just check` | `just` | `["check"]` |
+| GNU Make | `make check` | `make` | `["check"]` |
+| npm scripts | `npm run check` | `npm` | `["run", "check"]` |
 
-| 실행기 | JSON의 `tool` | JSON의 `args` |
-| --- | --- | --- |
-| mise tasks | `mise` | `["run", "check"]` |
-| Task | `task` | `["check"]` |
-| just | `just` | `["check"]` |
-| GNU Make | `make` | `["check"]` |
+사용자는 프로젝트에 선언된 작업과 의존 작업을 확인합니다.
+필요한 명령은 프로젝트 루트에서 직접 실행합니다. [수동 확인 명령의 결과 형식](diagnostic-cli.md#수동-확인-명령)
 
-`cwd`는 생략할 수 있습니다.
-지정하면 대상 프로젝트 내부의 상대 경로나 절대 경로를 사용합니다.
-`env`는 선택한 자식 작업에 전달할 환경 변수 이름과 문자열 값의 객체입니다.
-이 항목은 생략할 수 있습니다.
-원시 명령 출력·환경 값·비밀 값은 작업 보고서에 넣지 않습니다.
-외부 셸 문자열로 실행기 이름과 인수를 합성하지 않습니다.
-선택한 작업은 하위 명령을 실행할 수 있으므로 의존 작업과 호출할 서비스도 검토합니다.
-호출 형식과 전체 도구 목록은 [CLI 사용법](diagnostic-cli.md#선택한-문맥의-실행-검증)에 기록합니다.
-
-플러그인 경유 mise 실행은 도구 자동 설치를 비활성화합니다.
-`trusted: true`는 선택한 플러그인 작업에 대한 실행 의사입니다.
-플러그인은 별도의 `mise trust`, 자동 응답 또는 신뢰 경로 확장을 추가하지 않습니다.
-확인일의 mise 문서는 일반 `run`의 암묵적 설정 신뢰를 안내합니다.
-mise 자체의 신뢰 처리는 설치한 버전과 paranoid 설정을 따릅니다.
-자동 설치 비활성화가 mise 자체의 암묵적 신뢰까지 차단한다는 뜻은 아닙니다.
-신뢰가 필요한 모드에서 거부되거나 필요한 도구가 없으면 실행 결과에 부족한 조건을 남깁니다.
-mise의 일반 실행 기본값과 플러그인의 실행 제한은 구분합니다. [mise 자동 설치 설정](https://mise.jdx.dev/configuration/settings.html), [mise 설정 신뢰](https://mise.jdx.dev/security.html)
-
-샌드박스에서 mise 작업을 실행할 때는 mise 상태 경로의 쓰기 범위도 확인합니다.
-공유 상태 경로를 쓸 수 없으면 작업이 `failed`로 실패할 수 있습니다.
-원시 오류와 경로는 보고서에 복사하지 않습니다.
-Windows Job 실행은 작업의 원시 출력을 수집하지 않으므로 보고서만으로 실패 원인을 확정하지 않습니다.
-사용자가 선택한 작업 JSON의 `env.MISE_STATE_DIR`로 쓰기 가능한 작업용 상태 경로를 명시할 수 있습니다.
-이 선택은 해당 작업 프로세스에만 적용됩니다.
-도구 설치를 보관하는 `MISE_DATA_DIR`와 상태를 보관하는 `MISE_STATE_DIR`를 구분합니다.
-새 상태 경로에는 기존 상태 경로의 설정 신뢰 기록이 승계되지 않습니다.
-mise의 paranoid 모드 등 설정 신뢰 정책은 그대로 적용합니다. [mise 디렉터리](https://mise.jdx.dev/directories.html)
+직접 실행할 mise 작업에는 설치한 mise 버전의 자동 설치와 설정 신뢰 정책이 적용됩니다.
+도구 설치 경로는 `MISE_DATA_DIR`, 상태 경로는 `MISE_STATE_DIR`입니다. [mise 자동 설치 설정](https://mise.jdx.dev/configuration/settings.html) · [mise 설정 신뢰](https://mise.jdx.dev/security.html) · [mise 디렉터리](https://mise.jdx.dev/directories.html)
 
 ## 기존 실행기의 전환안과 유지 사유
 
@@ -272,8 +237,7 @@ RCM-01에는 현재 실행기와 권장 근거를 설명합니다.
 확인 가능한 `npm ci` 호출은 CI의 의존성 설치 단계로 기록합니다.
 텍스트와 JSON에 유지·제안·판단 보류와 확인한 선언 또는 CI 위치를 표시합니다.
 전환안에는 보존할 명령·변경할 진입점·검증할 동작·복구할 파일을 적습니다.
-유지를 선택하면 해당 프로젝트의 이유와 적용 범위를 남깁니다.
-검토 요청만으로 Taskfile·Justfile·Makefile·npm scripts를 재작성하지 않습니다.
+기존 유지 사유가 저장돼 있으면 해당 프로젝트의 이유와 적용 범위를 진단 결과에 표시합니다.
 
 | 관찰한 구성 | 제시할 전환안 | 유지 사유의 예 |
 | --- | --- | --- |
@@ -283,7 +247,7 @@ RCM-01에는 현재 실행기와 권장 근거를 설명합니다.
 | Makefile이 산출물 의존 관계를 관리 | 기존 Make 규칙을 호출하는 공통 진입점 검토 | 파일 기반 증분 빌드와 생성 규칙의 유지가 필요 |
 
 전환으로 동작이 같아진다는 가설은 같은 소스와 도구 버전에서 기존 명령과 후보 진입점을 비교해 확인합니다.
-종료 코드·산출물·선택한 서비스의 정리 결과가 다르면 동등하다는 가설을 기각합니다.
+종료 코드나 산출물이 다르면 동등하다는 가설을 기각합니다.
 실제로 비교하지 않은 전환안은 미검증 제안으로 표시합니다.
 성능 비교가 필요하면 같은 작업과 캐시 조건에서 실행 시간을 별도로 측정합니다.
 
