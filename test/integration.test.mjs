@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, lstat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { diagnose } from '../src/doctor.mjs';
-import { main, parseOptions, formatReport } from '../src/cli.mjs';
+import { parseOptions, formatReport } from '../src/cli.mjs';
 import { analyzeProject } from '../src/project.mjs';
 import { collectInfrastructure } from '../src/infrastructure.mjs';
 import { isReadOnlyQuery } from '../src/query.mjs';
-import { runProjectTask } from '../src/task.mjs';
 
 const NOW = '2026-11-17T12:00:00Z';
 const SECRET = 'INTEGRATION_PRIVATE_SENTINEL';
@@ -101,7 +101,7 @@ test('devcontainer와 단독 Compose의 호스트 언어 요구를 CLI 옵션까
   });
 });
 
-test('doctor에 실행 대상을 지정해도 execute:false에서는 기동 없이 설정 메타데이터만 조회한다', async (t) => {
+test('이전 실행 옵션을 API에 전달해도 Compose는 메타데이터와 확인 명령만 보고한다', async (t) => {
   const f = await fixture(t, { 'compose.yaml': 'services: {db: {image: "postgres:17"}}\n' });
   const docker = path.join(f.base, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe');
   const compose = path.join(f.base, 'Docker', 'Docker', 'resources', 'cli-plugins', 'docker-compose.exe');
@@ -120,11 +120,12 @@ test('doctor에 실행 대상을 지정해도 execute:false에서는 기동 없�
     if (args[0] === 'context' && args[1] === 'inspect') return success([{ Endpoints: { docker: { Host: `ssh://user:${SECRET}@example.test` } } }]);
     assert.fail(`기본 진단에 허용하지 않은 호출: ${tool} ${args.join(' ')}`);
   };
-  const report = await diagnose({ ...f.options, query, execute: false, distro: 'Ubuntu', linuxCwd: '/work', dockerContext: 'local', image: 'local:test', serviceConfig: 'process-compose.yaml', services: ['web'] });
-  for (const id of ['WSL-02', 'CTR-02', 'PC-02']) {
-    assert.equal(check(report, id).reason, 'execute_required');
+  const report = await diagnose({ ...f.options, query, execute: true, distro: 'Ubuntu', linuxCwd: '/work', dockerContext: 'local', image: 'local:test', serviceConfig: 'process-compose.yaml', services: ['web'] });
+  for (const id of ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02']) {
+    assert.equal(check(report, id).reason, 'manual_confirmation');
     assert.equal(check(report, id).execution, 'not_run');
   }
+  assert.ok(!Object.hasOwn(report, 'validation') && !Object.hasOwn(report, 'task'));
   assert.equal(check(report, 'CTR-01').observed.engine, 'not_contacted');
   assert.equal(check(report, 'CTR-01').observed.context.endpointKind, 'remote-ssh');
   assert.equal(check(report, 'CTR-01').observed.compose.method, 'verified_direct_plugin');
@@ -132,6 +133,7 @@ test('doctor에 실행 대상을 지정해도 execute:false에서는 기동 없�
   assert.deepEqual(calls.filter((call) => call.tool === 'docker').map((call) => call.args), [['context', 'show'], ['context', 'inspect', 'local']]);
   assert.equal(calls.filter((call) => call.tool === 'docker-compose').length, 1);
   assert.ok(calls.every((call) => call.options.execute !== true));
+  assert.deepEqual(report.commandGuidance.filter((item) => item.tool === 'docker').map((item) => item.args), [['version'], ['compose', 'ps']]);
   assert.ok(!JSON.stringify(report).includes(SECRET));
 });
 
@@ -220,64 +222,6 @@ test('통합 보고서는 선언의 비밀 값과 조회 원문을 노출하지 
   assert.equal(await readFile(path.join(f.root, '.env'), 'utf8'), `TOKEN=${SECRET}\n`);
 });
 
-async function cli(t, args, options) {
-  let output = '';
-  const write = process.stdout.write.bind(process.stdout);
-  // The test runner also writes binary protocol messages to stdout in child workers.
-  const capture = t.mock.method(process.stdout, 'write', (chunk, ...rest) => {
-    if (typeof chunk === 'string' && chunk.startsWith('{')) { output += chunk; return true; }
-    return write(chunk, ...rest);
-  });
-  try { return { code: await main(args, options), report: JSON.parse(output) }; }
-  finally { capture.mock.restore(); }
-}
-
-test('CLI task-file의 trusted native 작업은 validate --execute에서만 한 번 실행하고 원문을 숨긴다', async (t) => {
-  const f = await fixture(t, { 'task.json': { context: 'native', trusted: true, tool: 'npm', args: ['run', 'test', '--', SECRET] } });
-  for (const [action, execute] of [['doctor', false], ['validate', false], ['validate', true]]) await t.test(`${action} execute=${execute}`, async (st) => {
-    const tasks = [];
-    const result = await cli(st, [action, '--project', f.root, '--format', 'json', '--state-dir', f.options.stateDir, '--task-file', path.join(f.root, 'task.json'), ...(execute ? ['--execute'] : [])], { inspect: f.options.inspect, query: async (tool, args, options = {}) => {
-      if (!options.projectTask) return f.options.query(tool, args, options);
-      tasks.push({ tool, args, options });
-      return { ...success(SECRET), stderr: SECRET, executable: path.join(f.base, 'node.exe') };
-    } });
-    assert.equal(result.code, 0);
-    assert.equal(result.report.task.status, execute ? 'pass' : 'skipped');
-    assert.equal(tasks.length, execute ? 1 : 0);
-    assert.equal(result.report.checks.length, 30);
-    if (execute) {
-      assert.deepEqual(tasks[0], { tool: 'npm', args: ['run', 'test', '--', SECRET], options: { cwd: f.root, timeoutMs: 5000, execute: true, projectTask: true } });
-      assert.equal(result.report.task.stdout, 'not_collected');
-      assert.equal(result.report.task.stderr, 'not_collected');
-    }
-    assert.ok(!JSON.stringify(result.report).includes(SECRET));
-  });
-  assert.throws(() => parseOptions(['doctor', '--execute']), /validate/);
-});
-
-test('native 작업의 신뢰·도구·argv 검증 실패는 query에 전달되지 않는다', async () => {
-  const calls = [];
-  const query = async (...args) => { calls.push(args); return success(); };
-  const valid = { context: 'native', trusted: true, tool: 'node', args: ['test.mjs'] };
-  for (const task of [{ ...valid, trusted: false }, { ...valid, tool: 'cmd' }, { ...valid, args: 'node test.mjs' }, { ...valid, args: ['a\nsecret'] }, { ...valid, args: ['a\0secret'] }]) {
-    const result = await runProjectTask({ projectPath: 'C:/project', task, execute: true, query });
-    assert.equal(result.status, 'fail');
-    assert.equal(result.reason, 'trusted_task_required');
-  }
-  assert.equal(await runProjectTask({ task: { ...valid, context: 'wsl' }, execute: true, query }), null);
-  assert.deepEqual(calls, []);
-});
-
-test('CLI는 native 작업 실패를 진단 집계와 별도로 종료 코드 1에 반영한다', async (t) => {
-  const f = await fixture(t, { 'task.json': { context: 'native', trusted: true, tool: 'node', args: ['test.mjs'] } });
-  const result = await cli(t, ['validate', '--execute', '--project', f.root, '--state-dir', f.options.stateDir, '--format', 'json', '--task-file', path.join(f.root, 'task.json')], { inspect: f.options.inspect, query: async (tool, args, options = {}) => options.projectTask ? { state: 'failed', exitCode: 9, stdout: SECRET, stderr: SECRET } : f.options.query(tool, args, options) });
-  assert.equal(result.report.summary.fail, 0);
-  assert.equal(result.report.task.exitCode, 9);
-  assert.equal(result.report.task.status, 'fail');
-  assert.equal(result.code, 1);
-  assert.ok(!JSON.stringify(result.report).includes(SECRET));
-});
-
 test('WSL 호스트 버전만 조회되면 WSL-01은 배포판 확인을 완료하지 않는다', async (t) => {
   const f = await fixture(t);
   const version = { state: 'succeeded', exitCode: 0, arguments: ['--version'], version: '2.7.3.0' };
@@ -292,72 +236,6 @@ test('WSL 호스트 버전만 조회되면 WSL-01은 배포판 확인을 완료�
   f.host.probes.wsl.data = { distributions: [{ name: 'FixtureLinux', generation: 2 }],
     queries: [version, { ...list, state: 'succeeded', exitCode: 0 }] };
   assert.equal(check(await diagnose(options), 'WSL-01').status, 'pass');
-});
-
-test('WSL 사전 조회가 성공해도 선택한 작업을 실행하지 못하면 CLI는 종료 코드 1을 반환한다', async (t) => {
-  const f = await fixture(t, { 'task.json': { context: 'wsl', trusted: true, tool: '/usr/bin/true', args: [] } });
-  const args = ['validate', '--project', f.root, '--state-dir', f.options.stateDir, '--format', 'json',
-    '--task-file', path.join(f.root, 'task.json'), '--distro', 'FixtureLinux', '--linux-cwd', '/workspace', '--linux-tools', 'bash'];
-  const notRun = { state: 'not_run', exitCode: null, stdout: '', stderr: '' };
-  for (const { execute, reply, code, execution, taskCalls } of [
-    { execute: false, reply: notRun, code: 0, execution: 'not_run', taskCalls: 0 },
-    { execute: true, reply: notRun, code: 1, execution: 'not_run', taskCalls: 1 },
-    { execute: true, reply: success(), code: 0, execution: 'succeeded', taskCalls: 1 },
-  ]) {
-    let selectedCalls = 0;
-    const result = await cli(t, execute ? [...args, '--execute'] : args, { inspect: f.options.inspect, query: async (tool, argv, options = {}) => {
-      if (tool !== 'wsl' || !options.execute) return f.options.query(tool, argv, options);
-      if (argv.includes('/bin/sh')) return success('OS=Linux\nARCH=x86_64\nCWD=/workspace\nsh=/usr/bin/sh\nbash=/usr/bin/bash');
-      if (argv.includes('/usr/bin/bash')) return success('GNU bash, version 5.2.21');
-      assert.ok(argv.includes('/usr/bin/true'));
-      selectedCalls += 1;
-      return reply;
-    } });
-    assert.equal(result.code, code);
-    assert.equal(check(result.report, 'WSL-02').execution, execution);
-    assert.equal(selectedCalls, taskCalls);
-    if (execute && code === 1) {
-      assert.equal(check(result.report, 'WSL-02').status, 'unknown');
-      assert.equal(check(result.report, 'WSL-02').reason, 'not_run');
-    }
-  }
-});
-
-test('범위가 빠진 WSL 작업과 알 수 없는 작업 문맥이 조용히 성공하지 않는다', async (t) => {
-  const f = await fixture(t, { 'wsl.json': { context: 'wsl', trusted: true, tool: '/usr/bin/true', args: [] } });
-  const args = ['validate', '--execute', '--project', f.root, '--state-dir', f.options.stateDir, '--format', 'json'];
-  const result = await cli(t, [...args, '--task-file', path.join(f.root, 'wsl.json')], { inspect: f.options.inspect, query: f.options.query });
-  const wsl = check(result.report, 'WSL-02');
-  assert.equal(wsl.applicability, 'required');
-  assert.equal(wsl.execution, 'not_run');
-  assert.equal(result.code, 1);
-  assert.ok(f.calls.every((call) => call.options.execute !== true));
-
-  const file = path.join(f.root, 'invalid.json');
-  await writeFile(file, JSON.stringify({ context: 'wls', trusted: true, tool: '/usr/bin/true', args: [] }));
-  await assert.rejects(main([...args, '--task-file', file], {
-    inspect: async () => assert.fail('호스트를 조회하기 전에 작업 문맥을 검사해야 합니다.'),
-  }), /context는 native, rust, wsl/);
-});
-
-test('Cargo 선언이 있어도 명시한 native 작업만 실행하고 Rust 링크 검사는 생략한다', async (t) => {
-  const f = await fixture(t, { 'Cargo.toml': '[package]\nname = "review-fixture"\nversion = "0.1.0"\n',
-    'task.json': { context: 'native', trusted: true, tool: 'node', args: ['--version'] } });
-  const executable = path.join(f.base, 'rustc.exe');
-  f.host.commands.rustc = [candidate('rustc', executable)];
-  f.host.probes.rustc = { state: 'succeeded', exitCode: 0, version: '1.92.0', executable };
-  const executions = [];
-  const result = await cli(t, ['validate', '--execute', '--project', f.root, '--state-dir', f.options.stateDir,
-    '--format', 'json', '--task-file', path.join(f.root, 'task.json')], { inspect: f.options.inspect, query: async (tool, args, options = {}) => {
-    if (!options.execute) return f.options.query(tool, args, options);
-    executions.push([tool, ...args]);
-    return tool === 'node' ? success() : { state: 'failed', exitCode: 1, stdout: '', stderr: '' };
-  } });
-  assert.deepEqual(executions, [['node', '--version']]);
-  assert.equal(result.report.task.status, 'pass');
-  assert.equal(check(result.report, 'RUST-01').applicability, 'required');
-  assert.equal(check(result.report, 'RUST-02').status, 'skipped');
-  assert.equal(result.code, 0);
 });
 
 test('앱 설치 목록의 installed·available을 구분하고 --app 선택에만 미설치 실패를 반영한다', async (t) => {
@@ -384,4 +262,22 @@ test('앱 설치 목록의 installed·available을 구분하고 --app 선택에�
     if (expected === 'pass') assert.equal(appCheck.observed.skillInvocation, 'separate_app_evidence_required');
     assert.ok(!JSON.stringify(report).includes(SECRET));
   });
+});
+
+test('이전 버전의 프로젝트 유지 사유를 파일 변경 없이 보고한다', async (t) => {
+  const f = await fixture(t);
+  const projectPath = await realpath(f.root);
+  const projectKey = process.platform === 'win32' ? projectPath.toLowerCase() : projectPath;
+  const key = createHash('sha256').update(projectKey).digest('hex');
+  const folder = path.join(f.options.stateDir, 'exceptions');
+  await mkdir(folder, { recursive: true });
+  const saved = path.join(folder, `${key}.json`);
+  const exceptions = [{ projectPath, role: 'runtime-version-manager', reason: '기존 버전 관리자 유지', scope: 'project' }];
+  const contents = JSON.stringify({ projectPath, exceptions });
+  await writeFile(saved, contents);
+  const report = await diagnose(f.options);
+  assert.deepEqual(report.exceptions, exceptions);
+  assert.deepEqual(check(report, 'RCM-01').exceptions, exceptions);
+  assert.deepEqual(await readdir(folder), [path.basename(saved)]);
+  assert.equal(await readFile(saved, 'utf8'), contents);
 });

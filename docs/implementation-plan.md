@@ -1,7 +1,7 @@
 # CLI 구현 구조와 검증 경계
 
-이 문서는 CLI 구현 구조와 패키지 생성 절차를 설명합니다.
-배포 버전과 테스트·CI·실제 Codex 앱 검증 결과는 [검증 기록](verification.md)에서 확인합니다.
+이 문서는 읽기 전용 진단 CLI와 로컬 패키지의 구조를 설명합니다.
+이전 버전의 테스트·CI·실제 Codex 앱 관찰은 [검증 기록](verification.md)에서 확인합니다.
 명령 사용법은 [진단 CLI 사용법](diagnostic-cli.md)에 기록합니다.
 모듈 사이의 반환 계약은 [모듈 계약](completion-contract.md)에 기록합니다.
 
@@ -32,36 +32,29 @@ Windows 호스트 조회는 PowerShell 7을 프로필 없이 실행합니다.
 | `src/task-runners.mjs` | 실행기 파일과 지원 범위 내 작업 선언의 정적 분석입니다. |
 | `src/task-runner-checks.mjs` | 실행기 근거를 기존 check ID와 권장 차이에 연결하는 보고 통합입니다. |
 | `src/windows.mjs` | Windows 문맥·명령 후보 수집과 PE 실행 파일 검증입니다. |
-| `src/query.mjs` | 허용한 읽기 전용 조회와 명시적인 실행 작업의 전달입니다. |
+| `src/query.mjs` | 허용한 읽기 전용 조회를 전달합니다. |
 | `src/versions.mjs` | 언어별 버전 요구와 관찰 버전의 비교입니다. |
 | `src/runtime.mjs` | 실제 런타임 조회와 실행 파일 메타데이터의 선택 근거 보완입니다. |
 | `src/advanced.mjs` | mise·.NET·Git·IDE·보조 도구·저장소 볼륨의 추가 조회입니다. |
 | `src/infrastructure.mjs` | 패키지 관리자·Python 환경·WSL·Docker·Process Compose의 진단입니다. |
 | `src/support.mjs` | 유효기간이 있는 오프라인 공식 지원 정책 판정입니다. |
 | `src/app-check.mjs` | 선택한 Codex 실행 파일을 통한 앱 공유 설치 목록 조회입니다. |
-| `src/configure.mjs` | 계획·적용·저널·백업·복구·유지 예외입니다. |
-| `src/configuration-policy.mjs` | 설치 역할·패키지 ID·정확한 버전·명령 인수의 고정 정책입니다. |
-| `src/validation.mjs` | 선택한 Rust·WSL·Docker·Process Compose 실행 검증입니다. |
-| `src/service-session.mjs` | 검증에서 생성한 자식 서비스 세션의 시작과 정리입니다. |
-| `src/task.mjs` | 명시적으로 신뢰한 호스트 개발 작업과 별도 `task` 결과입니다. |
-| `src/doctor.mjs` | 30개 점검 ID의 통합 보고입니다. |
-| `src/cli.mjs` | 명령·옵션·출력·명시적인 실행 요청의 처리입니다. |
+| `src/exceptions.mjs` | 기존 프로젝트의 유지 사유를 읽습니다. |
+| `src/doctor.mjs` | 30개 점검 결과를 모으고 수동 확인 명령을 안내합니다. |
+| `src/cli.mjs` | `doctor`의 옵션과 출력 형식을 처리합니다. |
 | `scripts/lib/bundle.mjs` | 개발 빌드·검사·패키지 생성이 공유하는 CLI 번들 옵션입니다. |
 
-독립적인 읽기 전용 조회와 문맥별 검증은 모듈 안에서 병렬로 수행할 수 있습니다.
-파일 적용과 복구는 상태 잠금과 해시 비교를 거쳐 순서대로 진행합니다.
-모듈이 연결되었다는 사실과 실제 호스트에서 성공했다는 사실은 구분합니다.
+진단 모듈은 독립적인 정보를 병렬로 조회할 수 있습니다.
 
 ```mermaid
 flowchart TB
-    CLI["CLI 명령과 옵션"] --> Analysis["프로젝트 정적 분석"]
-    Analysis --> Doctor["doctor: 기본 보고"]
-    Doctor --> Queries["검증한 읽기 전용 조회"]
-    Queries --> Support["30개 ID와 오프라인 지원 판정"]
-    Analysis --> Plan["plan: 고정 정책과 입력 해시"]
-    Plan --> Apply["apply --execute: 백업과 적용 저널"]
-    Apply --> Rollback["rollback --execute: 해시가 일치하는 파일 복구"]
-    Analysis --> Validate["validate --execute: 선택 문맥의 실행과 자체 자원 정리"]
+    CLI["doctor"] --> Analysis["프로젝트 정적 분석"]
+    CLI --> Queries["허용한 호스트 조회"]
+    CLI --> Exceptions["기존 유지 사유 조회"]
+    Analysis --> Report["30개 점검과 도구 권장"]
+    Queries --> Report
+    Exceptions --> Report
+    Analysis --> Guidance["사용자가 직접 실행할 확인 명령"]
 ```
 
 ## 프로젝트 분석의 경계
@@ -104,7 +97,50 @@ includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `un
 현재 스냅샷의 만료일은 2026-12-17입니다.
 지원 릴리스 계열의 판정은 최신 패치나 보안 취약점 확인과 구분합니다.
 
-## 계획·적용·복구
+## 유지 사유와 확인 명령
+
+`src/exceptions.mjs`는 이전에 저장한 유지 사유를 읽습니다.
+`--state-dir`로 해당 저장 위치를 지정할 수 있습니다.
+보고서는 프로젝트의 기존 유지 사유를 JSON의 `exceptions`에 표시합니다.
+
+`doctor`는 정적으로 확인한 요구와 도구 선택을 근거로 수동 확인 명령을 안내합니다.
+`RUST-02`, `WSL-02`, `CTR-02`, `PC-02`는 `skipped`로 남깁니다.
+JSON 배열과 한국어 텍스트의 표시 방법은 [CLI 사용법](diagnostic-cli.md#수동-확인-명령)에 있습니다.
+
+## 빌드와 패키지
+
+저장소 루트에서 다음 명령을 순서대로 실행합니다.
+
+```powershell
+npm ci --ignore-scripts
+node scripts/build.mjs
+node --test
+node scripts/check-package.mjs
+node scripts/package-plugin.mjs
+node scripts/check-package.mjs --packaged
+```
+
+개발 빌드는 저장소의 `dist/cli.mjs`를 생성합니다.
+소스 검사는 빌드 결과와 현재 소스에서 다시 빌드한 바이트를 대조합니다.
+패키지 생성은 `.local/plugin-marketplace/plugins/` 아래의 새 패키지에 `dist/cli.mjs`를 작성합니다.
+`--packaged`는 로컬 마켓플레이스가 가리키는 패키지의 번들을 현재 소스의 메모리 빌드와 바이트 단위로 대조합니다.
+생성한 패키지를 검사한 뒤 마켓플레이스 목록이 가리키는 경로를 교체합니다.
+
+패키지에는 `environment-doctor` Skill, CLI 번들, PowerShell 조회 스크립트, 문서, 서드파티 고지를 포함합니다.
+PowerShell 조회 스크립트는 `scripts/collect-host.ps1`과 `scripts/collect-advanced.ps1`입니다.
+개발용 빌드·검사·패키지 스크립트는 소스 체크아웃에서 실행합니다.
+설치 절차는 [README](../README.md#로컬-플러그인-설치)에 기록합니다.
+
+## 이전 구현 이력
+
+아래의 설정과 선택 실행은 당시 구현을 설명합니다.
+현재 진단 CLI의 명령은 [기본 점검](diagnostic-cli.md#기본-점검)에서 확인할 수 있습니다.
+
+0.1.0은 외부 실행 의존성이 없는 첫 읽기 전용 CLI를 대상으로 했습니다.
+P0 22개 ID의 제한된 분석을 제공했고 P1 8개와 설정 적용은 후속 작업이었습니다.
+0.2.1 및 이전 버전의 실행 확인은 과거 이력에서 확인합니다. [검증 기록](verification.md)
+
+### 계획·적용·복구
 
 계획은 선택한 역할과 정확한 버전에서 고정된 작업을 생성합니다.
 기존 런타임 선언과 충돌하는 변경은 보류합니다.
@@ -123,7 +159,7 @@ includes·import·동적 변수·템플릿 등 지원하지 않는 문법은 `un
 기존 작업의 자동 변환·새 실행기의 필수 설치·hook·마이그레이션을 추가하지 않습니다.
 선택 근거와 공식 자료의 적용 범위는 [작업 실행기 가이드](task-runners.md)에 기록합니다.
 
-## 선택 실행 검증
+### 선택 실행 검증
 
 실행 검증은 `validate --execute`에서 선택합니다.
 메타데이터를 확인하는 흐름은 `doctor`에서 시작합니다.
@@ -151,34 +187,3 @@ Rust·WSL 작업의 근거는 `report.validation`에서 해당 ID의 `steps` 아
 `--task-file`은 플러그인 JSON이며 Go Task의 Taskfile YAML이 아닙니다.
 플러그인 경유 mise 실행은 도구 자동 설치를 비활성화합니다.
 플러그인 작업의 `trusted: true`는 mise 설정 신뢰를 자동 승격하지 않습니다.
-
-## 빌드와 패키지
-
-저장소 루트에서 다음 명령을 순서대로 실행합니다.
-
-```powershell
-npm ci --ignore-scripts
-node scripts/build.mjs
-node --test
-node scripts/check-package.mjs
-node scripts/package-plugin.mjs
-node scripts/check-package.mjs --packaged
-```
-
-개발 빌드는 저장소의 `dist/cli.mjs`를 생성합니다.
-소스 검사는 빌드 결과와 현재 소스에서 다시 빌드한 바이트를 대조합니다.
-패키지 생성은 `.local/plugin-marketplace/plugins/` 아래의 새 패키지에 `dist/cli.mjs`를 작성합니다.
-`--packaged`는 로컬 마켓플레이스가 가리키는 패키지의 번들을 현재 소스의 메모리 빌드와 바이트 단위로 대조합니다.
-생성한 패키지를 검사한 뒤 마켓플레이스 목록이 가리키는 경로를 교체합니다.
-
-패키지에는 세 Skill·CLI 번들·PowerShell 런타임 자산·문서·정책 자료·서드파티 고지를 포함합니다.
-PowerShell 런타임 자산은 `scripts/collect-host.ps1`, `scripts/collect-advanced.ps1`, `scripts/start-owned-session.ps1`입니다.
-패키지의 `scripts/`에는 이 세 파일만 들어갑니다.
-개발용 빌드·검사·패키지 스크립트는 소스 체크아웃에서 실행합니다.
-설치 절차는 [README](../README.md#로컬-플러그인-설치)에 기록합니다.
-
-## 이전 구현 이력
-
-0.1.0은 외부 실행 의존성이 없는 첫 읽기 전용 CLI를 대상으로 했습니다.
-P0 22개 ID의 제한된 분석을 제공했고 P1 8개와 설정 적용은 후속 작업이었습니다.
-0.2.1 및 이전 버전의 실행 확인은 과거 이력에서 확인합니다. [검증 기록](verification.md)

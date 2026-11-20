@@ -1,22 +1,20 @@
 # 모듈 계약
 
-이 문서는 모듈 계약과 0.3.3의 WSL 공통 실행기 계약을 기록합니다.
-기준일은 2026-11-18입니다.
-실제 호스트와 앱의 검증 상태는 [검증 기록](verification.md)에서 별도로 관리합니다.
-명령 형식은 [진단 CLI 사용법](diagnostic-cli.md)을 따릅니다.
+이 문서는 읽기 전용 진단 모듈의 입력과 출력을 설명합니다.
+명령 형식은 [진단 CLI 사용법](diagnostic-cli.md)에 있습니다.
+이전 버전의 실제 호스트와 앱 관찰은 [검증 기록](verification.md)에서 확인합니다.
 
 ## 공통 계약
 
 Node.js 24 이상과 PowerShell 7을 실행 기준으로 사용합니다.
-기본 진단은 정적 분석과 허용한 읽기 전용 조회로 구성합니다.
-적용·유지 예외 저장·실행 검증의 CLI 경로는 `--execute`로 구분합니다.
+진단은 프로젝트의 정적 분석과 허용한 읽기 전용 조회로 구성합니다.
 소스 설정·환경 값·인증 값·원시 명령 출력은 사용자 보고서에 복사하지 않습니다.
 조회 실패와 요구 위반은 서로 다른 결과입니다.
 
 `doctor`는 P0 22개와 P1 8개를 합친 30개 ID를 보고합니다.
 판정은 `pass`, `fail`, `warn`, `unknown`, `skipped`를 사용합니다.
 적용 대상·경로 해석·실행·호환성·공식 지원·권장 차이는 별도 필드입니다.
-선택하지 않은 실행 검증을 통과로 바꾸지 않습니다.
+`RUST-02`, `WSL-02`, `CTR-02`, `PC-02`의 상태는 `skipped`, 사유는 `manual_confirmation`입니다.
 
 ## 프로젝트 분석
 
@@ -81,7 +79,6 @@ Python의 `metadata.virtualEnvironments`는 `pythonVenv.environments`와 같은 
 반환값은 `state`, `stdout`, `stderr`, `exitCode`, `executable`, `arguments`, 선택적 `reason`을 포함합니다.
 `stdout`과 `stderr`는 내부 해석용이며 보고서의 공개 계약이 아닙니다.
 각 진단 모듈은 필요한 값만 추출하고 원시 출력을 제거합니다.
-명시적인 실행 경로는 `options.execute: true`로 구분합니다.
 
 ## 추가 진단과 인프라
 
@@ -108,7 +105,65 @@ Docker context와 Compose 버전 조회를 엔진 기동·연결 검증과 구�
 기간 밖의 조회와 수록하지 않은 도구는 `unknown`으로 남깁니다.
 패치 최신성과 플랫폼 전체 지원 여부는 릴리스 계열 판정과 별도입니다.
 
-## 설정과 복구
+## 기존 유지 사유
+
+`src/exceptions.mjs`의 `loadExceptions(projectRoot, stateDir)`는 대상 프로젝트에 이미 저장된 유지 사유를 읽습니다.
+기본 상태 경로는 `LOCALAPPDATA/WindowsAgentDevkit/state`입니다.
+`stateDir`를 명시하면 지정한 저장소 밖 경로를 사용합니다.
+파일이 없으면 빈 배열을 반환합니다.
+`doctor`는 읽기 오류를 `exceptions.state: "unknown"`으로 표시합니다.
+
+## 수동 확인 명령
+
+`report.commandGuidance`는 `{tool, args, description}` 객체의 배열입니다.
+`tool`은 도구 이름, `args`는 문자열 인수 배열, `description`은 확인할 내용입니다.
+작업 명령은 프로젝트 루트의 선언과 연결된 CI 호출에서 확인한 이름을 사용합니다.
+텍스트에서는 항목이 있을 때 **직접 실행할 명령**에 표시합니다.
+사용자가 프로젝트에 맞는 문맥에서 명령을 직접 실행합니다.
+
+## 작업 실행기 계약
+
+`metadata.taskRunners`는 mise tasks·Taskfile·Justfile·Makefile·npm scripts의 정적 선언 배열입니다.
+각 `state`는 `declared | unknown`입니다.
+`tasks`에는 정적으로 확인한 작업 이름만 포함합니다.
+`taskRunnerCI.kind`로 의존성 설치, 실행기 준비, 버전 확인을 작업 호출과 구분합니다.
+선택적 `taskDetails`는 `{name, shell?, directory?, environmentKeys?, dependencies?}`입니다.
+셸에는 알려진 실행 파일과 인수만 기록합니다.
+원시 작업 명령과 환경 변수 값은 포함하지 않습니다.
+포함 파일·파일 작업·동적 계산의 미지원 의미는 `unknown`과 사유로 남깁니다.
+
+`report.taskRunners`는 `recommended`, `declarations`, `ci`, `tools`, `recommendation`, `proposal`, `limitations`입니다.
+`recommended`는 한 실행기를 선택한 경우의 `mise | task | just | make | npm` 또는 `null`입니다.
+여러 기존 실행기를 유지하는 경우와 판단 보류에는 `null`을 사용합니다.
+`recommendation.action`은 `keep | suggest | defer`입니다.
+`recommendation.tools`에는 판정에 해당하는 실행기를 배열로 기록합니다.
+`recommendation.evidence`에는 근거가 된 선언·CI 위치·도구 선택을 기록합니다.
+CI 단계 번호는 JSON에서 0부터 시작합니다.
+기존 실행기는 자동 변환하지 않습니다.
+`recommendation.status`는 `aligned | different | unknown`입니다.
+이 판정은 프로젝트 작업의 실행 성공과 별도입니다.
+`tools`는 버전 조회의 실행 상태·버전·실제 실행 파일 경로를 기록합니다.
+정적 선언과 CI 관찰만으로 특정 실행기의 Windows 설치를 필수라고 확정하지 않습니다.
+
+기존 30개 ID에는 `REQ-01`, `PATH-01`, `TOOLS-01`, `ENV-02`, `SH-01`, `RCM-01`의 근거를 연결합니다.
+진단에서 실행기 호출은 허용한 버전 조회로 제한합니다.
+
+## 빌드와 확인 범위
+
+TOML·YAML·Node 버전·Python 버전은 고정한 실행 의존성 네 개로 해석합니다.
+esbuild는 별도 빌드 의존성입니다.
+설치용 CLI는 실행 의존성을 포함한 Node.js 24 대상의 번들입니다.
+실제 호스트와 Codex 앱의 검증 완료는 모듈 연결이나 단위 테스트의 통과만으로 선언하지 않습니다.
+
+버전별 실제 실행과 앱 설치본의 근거는 [검증 기록](verification.md)에 기록합니다.
+
+## 이전 계약 이력
+
+0.2에서 진단 모듈과 30개 점검 ID를 연결했습니다.
+아래는 설정·기동 검증·WSL 작업 등록을 제공하던 버전의 계약입니다.
+이전 버전의 수용 기준과 결과는 해당 버전의 기록으로 읽습니다.
+
+### 설정과 복구
 
 `src/configure.mjs`는 `createPlan`, `applyPlan`, `rollbackPlan`, `saveException`, `loadExceptions`를 내보냅니다.
 각 함수는 옵션 객체 하나를 받습니다.
@@ -134,7 +189,7 @@ Docker context와 Compose 버전 조회를 엔진 기동·연결 검증과 구�
 복구는 적용 후 해시가 일치하는 자체 파일 변경에만 수행합니다.
 동시 사용자 편집과 공유 설치는 보존합니다.
 
-## 실행 검증
+### 실행 검증
 
 `validateEnvironment({projectPath, project, host, options, query})`는 `{checks, evidence}`를 반환합니다.
 담당 ID는 `RUST-02`, `WSL-02`, `CTR-02`, `PC-02`입니다.
@@ -159,9 +214,9 @@ WSL과 Rust의 선택 작업 결과는 해당 ID의 `evidence.steps`에서 `phas
 기존 서비스·이미지·볼륨·프로세스는 삭제하지 않습니다.
 미선택·도구 부재·실패·준비 검사 부재는 서로 다른 근거로 보고합니다.
 
-## 승인한 WSL 작업의 등록 계약
+### 승인한 WSL 작업의 등록 계약
 
-### 0.3.3 공통 실행기 활성화
+#### 0.3.3 공통 실행기 활성화
 
 `wsl-enable --project <절대 경로>`는 대상 Windows 프로젝트를 읽기 전용으로 검토하고 `confirmation` 값을 반환합니다.
 같은 명령에 `--execute --confirm <값>`을 추가하면 그 프로젝트의 공통 실행기를 한 번 설치합니다.
@@ -175,7 +230,7 @@ WSL과 Rust의 선택 작업 결과는 해당 ID의 `evidence.steps`에서 `phas
 프로젝트 신뢰와 앱의 권한 설정은 사용자가 관리합니다.
 활성화 또는 등록을 적용할 때 앱이 권한 요청을 표시하면 사용자가 해당 호출을 승인합니다.
 
-### 등록 검토와 실행
+#### 등록 검토와 실행
 
 `wsl-register`의 검토는 입력을 읽고 확인 지문을 반환하는 읽기 전용 경로입니다.
 `confirmation`은 정규화된 Windows 프로젝트 경로·등록 이름·배포판·Linux 작업 경로·작업 JSON의 해석값·플러그인 버전에 결합된 SHA-256 지문입니다.
@@ -209,7 +264,7 @@ Windows 앱이 별도의 `LOCALAPPDATA`를 사용하는 경우 읽기 전용 조
 다음 등록이나 철회는 소유 프로세스의 종료를 확인한 잠금을 회수할 수 있습니다.
 실행 절차는 [승인한 WSL 작업 등록 가이드](wsl-task-registration.md)를 따릅니다.
 
-### 0.3.2 작업별 등록 계약
+#### 0.3.2 작업별 등록 계약
 
 기존 등록과 공통 실행기를 활성화하지 않은 프로젝트에는 0.3.2와 동일한 작업별 등록 계약을 적용합니다.
 작업별 등록에서는 전용 실행 파일과 검토한 작업의 고정 사본을 프로젝트와 Git 작업 트리 밖의 `LOCALAPPDATA/WindowsAgentDevkit/approved-wsl`에 둡니다.
@@ -220,7 +275,7 @@ Windows 앱이 별도의 `LOCALAPPDATA`를 사용하는 경우 읽기 전용 조
 같은 이름을 다시 등록할 때마다 새 전용 실행 경로를 발급합니다.
 실제 앱 관찰은 [0.3.2 검증 기록](verification.md#032-wsl-작업-등록)에 있습니다.
 
-### 설치본 검증 기준
+#### 설치본 검증 기준
 
 아래는 0.3.3 설치본과 Codex 앱에서 확인할 기준입니다.
 
@@ -254,7 +309,7 @@ Windows 앱이 별도의 `LOCALAPPDATA`를 사용하는 경우 읽기 전용 조
 규칙 구문의 정적 일치 결과와 실제 앱에서 실행된 Linux 작업의 결과를 각각 기록합니다.
 설치 여부와 검증 결과는 [검증 기록](verification.md)에 남깁니다.
 
-## 호스트 개발 작업
+### 호스트 개발 작업
 
 `runProjectTask({projectPath, task, execute, query, timeoutMs})`는 신뢰한 호스트 작업을 처리합니다.
 작업은 `context: "native"`, `trusted: true`, `tool`, `args: string[]`을 포함합니다.
@@ -270,7 +325,7 @@ CLI는 `validate --execute --task-file <파일>`에서 이 입력을 전달합�
 실행 요청이 없으면 작업은 생략되며 종료 코드는 아직 없습니다.
 원시 표준 출력과 표준 오류는 반환하지 않습니다.
 
-## 서비스 실행 상태
+### 서비스 실행 상태
 
 ```mermaid
 stateDiagram-v2
@@ -285,29 +340,8 @@ stateDiagram-v2
     생략 --> [*]
 ```
 
-## 작업 실행기 계약
+### 작업 실행기의 선택 실행 계약
 
-`metadata.taskRunners`는 mise tasks·Taskfile·Justfile·Makefile·npm scripts의 정적 선언 배열입니다.
-각 `state`는 `declared | unknown`입니다.
-`tasks`에는 정적으로 확인한 작업 이름만 포함합니다.
-`taskRunnerCI.kind`로 의존성 설치, 실행기 준비, 버전 확인을 작업 호출과 구분합니다.
-선택적 `taskDetails`는 `{name, shell?, directory?, environmentKeys?, dependencies?}`입니다.
-셸에는 알려진 실행 파일과 인수만 기록합니다.
-원시 작업 명령과 환경 변수 값은 포함하지 않습니다.
-포함 파일·파일 작업·동적 계산의 미지원 의미는 `unknown`과 사유로 남깁니다.
-
-`report.taskRunners`는 `recommended`, `declarations`, `ci`, `tools`, `recommendation`, `proposal`, `limitations`입니다.
-`recommended`는 한 실행기를 선택한 경우의 `mise | task | just | make | npm` 또는 `null`입니다.
-여러 기존 실행기를 유지하는 경우와 판단 보류에는 `null`을 사용합니다.
-`recommendation.action`은 `keep | suggest | defer`입니다.
-`recommendation.tools`에는 판정에 해당하는 실행기를 배열로 기록합니다.
-`recommendation.evidence`에는 근거가 된 선언·CI 위치·도구 선택을 기록합니다.
-CI 단계 번호는 JSON에서 0부터 시작합니다.
-기존 실행기는 자동 변환하지 않습니다.
-`recommendation.status`는 `aligned | different | unknown`입니다.
-이 판정은 프로젝트 작업의 실행 성공과 별도입니다.
-`tools`는 버전 조회의 실행 상태·버전·실제 실행 파일 경로를 기록합니다.
-정적 선언과 CI 관찰만으로 특정 실행기의 Windows 설치를 필수라고 확정하지 않습니다.
 명시적으로 선택한 native 실행기를 찾지 못하면 `PATH-01`과 작업 실행을 실패로 보고합니다.
 
 기존 30개 ID에는 `REQ-01`, `PATH-01`, `TOOLS-01`, `ENV-02`, `SH-01`, `RCM-01`의 근거를 연결합니다.
@@ -342,18 +376,3 @@ sequenceDiagram
     V->>R: trusted JSON과 --execute의 선택한 작업
     R-->>V: 종료 코드·프로세스 정리 근거
 ```
-
-## 빌드와 확인 범위
-
-TOML·YAML·Node 버전·Python 버전은 고정한 실행 의존성 네 개로 해석합니다.
-esbuild는 별도 빌드 의존성입니다.
-설치용 CLI는 실행 의존성을 포함한 Node.js 24 대상의 번들입니다.
-실제 호스트와 Codex 앱의 검증 완료는 모듈 연결이나 단위 테스트의 통과만으로 선언하지 않습니다.
-
-버전별 실제 실행과 앱 설치본의 근거는 [검증 기록](verification.md)에 기록합니다.
-
-## 이전 계약 이력
-
-초기 계약은 0.1 구현 이후의 남은 기능을 나누기 위한 문서였습니다.
-0.2에서는 이 문서의 모듈과 30개 점검 ID를 연결했습니다.
-기존의 후속 구현 표현은 이전 계획의 이력이며 실제 호스트 검증과는 구분합니다.

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { diagnose, P0_IDS, P1_IDS } from '../src/doctor.mjs';
 import { analyzeProject } from '../src/project.mjs';
 import { summarizeTaskRunners, collectTaskRunnerTools } from '../src/task-runner-checks.mjs';
-import { formatReport, main } from '../src/cli.mjs';
+import { formatReport } from '../src/cli.mjs';
 
 const SECRET = 'TASK_RUNNER_PRIVATE_OUTPUT';
 const outputs = { mise: 'mise 2026.11.9 windows-x64', task: 'Task version: v3.54.0', just: 'just 1.52.0', make: 'GNU Make 4.4.1' };
@@ -139,21 +139,22 @@ test('여러 실행기의 정의와 CI 호출이 일치하면 확인한 실행�
 
 test('루트의 npm 스크립트가 CI에도 연결된 경우 유지 권장과 확인 근거를 반환한다', async (t) => {
   const f = await fixture(t, {
-    'package.json': JSON.stringify({ scripts: { build: 'node build.mjs', test: 'node --test' } }),
+    'package.json': JSON.stringify({ scripts: { build: 'node build.mjs', test: 'node --test', deploy: 'node deploy.mjs' } }),
     [workflowSource]: workflow({
-      verify: hostJob([{ run: 'npm ci --ignore-scripts' }, { run: 'npm run build' }, { run: 'npm test' }]),
+      verify: hostJob([{ run: 'npm ci --ignore-scripts' }, { run: 'npm run build' }, { run: 'npm test' }, { run: 'npm run deploy' }]),
     }),
   });
   const report = await diagnose(f.options);
   assertRecommendation(report.taskRunners, 'keep', ['npm']);
   const { recommendation, ci } = report.taskRunners;
   assert.equal(recommendation.reason, 'ci_uses_root_npm_scripts');
-  assert.deepEqual(recommendation.matchedTasks, ['build', 'test']);
+  assert.deepEqual(recommendation.matchedTasks, ['build', 'test', 'deploy']);
   assert.equal(ci[0].kind, 'dependency_install');
   assert.equal(ci[0].task, undefined);
   assert.equal(report.checks.find((item) => item.checkId === 'REQ-01').status, 'pass');
-  assert.match(formatReport(report), /\bnpm\b/i);
-  assert.equal(report.task, null);
+  assert.deepEqual(report.commandGuidance.filter((item) => item.tool === 'npm').map((item) => item.args), [['run', 'build'], ['run', 'test']]);
+  assert.match(formatReport(report), /npm run test/);
+  assert.ok(!f.calls.some((item) => item.tool === 'npm' && item.args[0] === 'run'));
 });
 
 test('npm CI 호출은 명령 종류와 작업 디렉터리로 판정한다', async (t) => {
@@ -236,7 +237,6 @@ test('반복 CI가 다중언어 도구 또는 mise로 관리하는 언어 도구
     const report = await diagnose(f.options);
     assertRecommendation(report.taskRunners, 'suggest', ['mise']);
     assert.ok(JSON.stringify(report.taskRunners.recommendation.evidence).includes(workflowSource));
-    assert.equal(report.task, null);
     assert.ok(f.calls.every(({ options }) => options.execute !== true));
     assert.match(formatReport(report), /\bmise\b/i);
   });
@@ -399,7 +399,7 @@ test('doctor가 실제 작업 파일을 탐지하고 버전만 조회하며 30�
   assert.equal(report.taskRunners.tools.find((item) => item.tool === 'task')?.version, '3.54.0');
   assert.equal(report.taskRunners.tools[0].projectTaskExecution, 'not_run');
   assert.ok(f.calls.filter((item) => Object.hasOwn(outputs, item.tool)).every((item) => item.args.length === 1 && item.args[0] === '--version' && item.options.execute !== true));
-  assert.equal(report.task, null);
+  assert.ok(!Object.hasOwn(report, 'task'));
   assert.equal(await readFile(path.join(f.root, 'Taskfile.yml'), 'utf8'), source);
   assert.ok(!JSON.stringify(report).includes(SECRET));
   const text = formatReport(report);
@@ -423,15 +423,12 @@ test('동적 Taskfile이 있으면 반복 CI에도 판단을 보류한다', asyn
   assert.ok(f.calls.every((item) => item.options.execute !== true));
 });
 
-test('선언된 Make를 Windows 필수 설치로 단정하지 않고 명시 선택 실패와 구분한다', async (t) => {
+test('Makefile 선언만으로 Windows 필수 설치를 확정하지 않는다', async (t) => {
   const f = await fixture(t, { Makefile: '.PHONY: check\ncheck:\n\t@echo check\n' });
   const query = async () => ({ state: 'not_found', stdout: '', stderr: '', exitCode: null });
   const report = await diagnose({ ...f.options, query });
   assert.equal(report.taskRunners.tools.find((item) => item.tool === 'make')?.resolution, 'not_resolved');
   assert.equal(report.checks.find((item) => item.checkId === 'PATH-01').status, 'warn');
-  const selected = await diagnose({ ...f.options, query, task: { context: 'native', trusted: true, tool: 'make', args: ['check'] }, execute: true });
-  assert.equal(selected.task.status, 'fail');
-  assert.equal(selected.checks.find((item) => item.checkId === 'PATH-01').status, 'fail');
 });
 
 test('지원하지 않는 버전 출력과 조회 실패를 성공한 실행기로 바꾸지 않는다', async () => {
@@ -441,21 +438,4 @@ test('지원하지 않는 버전 출력과 조회 실패를 성공한 실행기�
     assert.equal(tools[0].version, null);
     assert.ok(!JSON.stringify(tools).includes(SECRET));
   }
-});
-
-test('명시한 작업을 실행하지 못한 validate는 CLI 성공 코드로 자동화를 통과시키지 않는다', async (t) => {
-  const f = await fixture(t, { 'package.json': '{"scripts":{"check":"node --test"}}' });
-  const selected = path.join(f.root, 'task.json');
-  await writeFile(selected, JSON.stringify({ context: 'native', trusted: true, tool: 'npm', args: ['run', 'check'] }));
-  const original = process.stdout.write;
-  let output = '';
-  process.stdout.write = (data) => { output += data; return true; };
-  try {
-    const code = await main(['validate', '--project', f.root, '--task-file', selected, '--execute', '--format', 'json', '--state-dir', path.join(f.root, '.state')], {
-      inspect: async () => f.host, query: async () => ({ state: 'not_run', stdout: '', stderr: '', exitCode: null }),
-    });
-    assert.equal(code, 1);
-    assert.equal(JSON.parse(output).task.status, 'unknown');
-    assert.equal(JSON.parse(output).task.execution, 'not_run');
-  } finally { process.stdout.write = original; }
 });

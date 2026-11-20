@@ -3,7 +3,8 @@
 ## Scope
 
 This repository contains a Windows development-environment proposal and a local Codex plugin project.
-The implementation includes read-only diagnostics, reviewed setup and rollback, scoped execution validation, and a bundled local plugin package.
+The plugin provides tool recommendations, read-only environment diagnostics, and guidance on commands the user can run.
+The repository provides a bundled local plugin package.
 Read README.md and the relevant document under docs/ before changing behavior.
 Keep planned features separate from implemented and verified features.
 

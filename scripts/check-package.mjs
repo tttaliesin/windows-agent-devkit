@@ -11,7 +11,7 @@ import { BUNDLE_PATH, bundleOptions } from './lib/bundle.mjs';
 
 export const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const MARKETPLACE_NAME = 'windows-agent-devkit-local';
-const RUNTIME_SCRIPTS = ['collect-advanced.ps1', 'collect-host.ps1', 'start-owned-session.ps1', 'wsl-task-launcher.go'];
+const RUNTIME_SCRIPTS = ['collect-advanced.ps1', 'collect-host.ps1'];
 const DEPENDENCIES = { '@renovatebot/pep440': '6.0.0', semver: '7.8.6', 'smol-toml': '1.9.1', yaml: '2.9.1' };
 const DEV_DEPENDENCIES = { esbuild: '0.28.2' };
 const normalized = (value) => value.replaceAll('\\', '/');
@@ -77,7 +77,9 @@ export async function verifyManifest(root, packageData) {
   assert.equal(manifest.name, packageData.name);
   assert.equal(manifest.version, packageData.version);
   for (const field of ['skills', 'mcpServers', 'apps', 'interface']) assert.ok(!(field in manifest), `portable manifest: ${field}`);
-  assert.ok(manifest.extensions?.['com.openai']?.interface?.displayName);
+  const pluginInterface = manifest.extensions?.['com.openai']?.interface;
+  assert.ok(pluginInterface?.displayName);
+  assert.deepEqual(pluginInterface.capabilities, ['Read'], '플러그인의 읽기 전용 범위');
   return manifest;
 }
 
@@ -214,7 +216,17 @@ assert.ok(code===0||code===1);`;
     assert.deepEqual(new Set(report.taskRunners.declarations.map((item) => item.tool)), new Set(['mise', 'task', 'just', 'make', 'npm']), '독립 번들의 작업 실행기 탐지');
     assert.equal(report.taskRunners.recommendation.action, 'keep', '독립 번들의 기존 작업 실행기 유지 판정');
     assert.equal(report.taskRunners.recommended, null, '독립 번들이 여러 실행기를 한 가지로 바꾸도록 제안하지 않습니다.');
-    assert.equal(report.task, null, '독립 번들 진단은 작업을 실행하지 않습니다.');
+    assert.ok(!Object.hasOwn(report, 'task') && !Object.hasOwn(report, 'validation'), '독립 번들에 작업 실행 결과가 없어야 합니다.');
+    assert.ok(report.commandGuidance.some(({ tool, args }) => tool === 'node' && args[0] === '--version'));
+    for (const id of ['RUST-02', 'WSL-02', 'CTR-02', 'PC-02']) {
+      const check = report.checks.find((item) => item.checkId === id);
+      assert.equal(check.status, 'skipped');
+      assert.equal(check.execution, 'not_run');
+    }
+    const retired = await runNode([cli, 'validate', '--execute', '--docker-context', 'invalid-smoke', '--project', fixture], temporary);
+    assert.equal(retired.code, 2, '설치 번들은 기존 기동 검증 진입점을 거부합니다.');
+    assert.equal(retired.stdout, '');
+    await assert.rejects(lstat(state), { code: 'ENOENT' }, '진단은 상태 디렉터리를 만들지 않습니다.');
     for (const id of ['NODE-01', 'PY-01']) assert.equal(report.checks.find((c) => c.checkId === id)?.compatibility, 'satisfied', `번들 파서·버전 검사: ${id}`);
     assert.ok(!tested.stdout.includes('never-copy-this-value'), '비밀 값 제외');
     let native = 'not_applicable';
@@ -223,21 +235,7 @@ assert.ok(code===0||code===1);`;
       const live = await runNode([cli, 'doctor', '--project', empty, '--format', 'json', '--timeout-ms', '5000', '--state-dir', state], temporary);
       assert.ok([0, 1].includes(live.code), 'Windows 번들·PowerShell 자산 실제 실행');
       assert.ok(Array.isArray(JSON.parse(live.stdout).checks), 'Windows 진단 JSON');
-      const task = join(empty, 'wsl-task.json');
-      await writeFile(task, JSON.stringify({ context: 'wsl', trusted: true, tool: '/usr/bin/bash', args: ['./scripts/check.sh'] }));
-      const review = await runNode([
-        cli, 'wsl-register', '--project', empty, '--task-name', 'check', '--distro', 'Ubuntu-24.04',
-        '--linux-cwd', '/home/example/project', '--task-file', task,
-      ], temporary);
-      assert.equal(review.code, 0, '번들의 WSL 등록 검토는 배포판이나 Go 실행 없이 작동해야 합니다.');
-      assert.match(JSON.parse(review.stdout).confirmation, /^[a-f0-9]{64}$/);
-      const enable = await runNode([cli, 'wsl-enable', '--project', empty], temporary);
-      assert.equal(enable.code, 0, '고정 실행기 검토는 실행기를 빌드하지 않습니다.');
-      const runner = JSON.parse(enable.stdout);
-      assert.equal(runner.state, 'review_required');
-      assert.match(runner.confirmation, /^[a-f0-9]{64}$/);
-      assert.equal(basename(runner.executable), 'wsl-run.exe');
-      await assert.rejects(lstat(join(empty, '.codex')), { code: 'ENOENT' }, '등록 검토는 프로젝트 권한 파일을 만들지 않습니다.');
+      await assert.rejects(lstat(join(empty, '.codex')), { code: 'ENOENT' }, '진단은 프로젝트 권한 파일을 만들지 않습니다.');
       native = 'passed';
     }
     for (const [name, content] of Object.entries(declarations)) assert.equal(await readFile(join(fixture, name), 'utf8'), content, `진단 원본 보존: ${name}`);
@@ -255,7 +253,8 @@ export async function checkRepository(root = ROOT) {
   await verifyManifest(root, packageData);
   const files = ['README.md', 'AGENTS.md', 'package.json', 'package-lock.json', 'plugin.json'].map((file) => join(root, file));
   for (const directory of ['docs', 'skills', 'src', 'scripts', 'test', '.github/workflows', 'data']) files.push(...await filesUnder(join(root, directory), { optional: directory === 'data' }));
-  const text = await verifyTextFiles(root, files, { skills: true }); assert.ok(text.skills > 0, 'Skill이 하나 이상 필요합니다.');
+  const text = await verifyTextFiles(root, files, { skills: true });
+  assert.equal(text.skills, 1, '읽기 전용 진단 Skill만 포함합니다.');
   await verifyBundleMatchesSource(root, root, lock, 'dist/cli.mjs가 현재 소스의 빌드와 다릅니다. npm run build를 실행하세요.');
   const smoke = await smokeBundle(root, packageData.version);
   return { ...text, smoke };
@@ -278,7 +277,8 @@ export async function verifyPackaged(directory, sourceRoot = ROOT) {
   const notices = await productionNotices(sourceRoot, lock);
   assert.deepEqual(await json(join(directory, 'THIRD_PARTY_COMPONENTS.json')), notices.components, '프로덕션 전이 의존성 고지');
   assert.equal(await readFile(join(directory, 'THIRD_PARTY_NOTICES.txt'), 'utf8'), notices.text, 'LICENSE·NOTICE 원문');
-  const text = await verifyTextFiles(directory, files, { skills: true }); assert.ok(text.skills > 0);
+  const text = await verifyTextFiles(directory, files, { skills: true });
+  assert.equal(text.skills, 1, '설치 패키지는 읽기 전용 진단 Skill만 포함합니다.');
   return { directory, ...text, components: notices.components.length, smoke: await smokeBundle(directory, manifest.version) };
 }
 export async function checkMarketplace(root = ROOT) {

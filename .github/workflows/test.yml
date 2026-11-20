@@ -31,5 +31,3 @@ jobs:
         run: npm run package
       - name: Smoke test packaged CLI without node_modules
         run: node scripts/check-package.mjs --packaged
-      - name: Smoke test controlled Windows workflows
-        run: node scripts/smoke-windows.mjs
