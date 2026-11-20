@@ -31,6 +31,23 @@
 진단과 명령 거부 검증은 같은 앱 대화의 기본 샌드박스에서 설치본으로 수행했습니다.
 플러그인을 갱신하고 검증을 마친 뒤 비교한 Codex 설정과 허용 규칙의 파일 내용, 수정 시각, 접근 권한은 갱신 전과 일치했습니다.
 
+### Docker 클라이언트 미탐지
+
+2026-11-20에 PR #9가 머지된 `main` 커밋 `adee718`의 앱 설치본 0.3.5로 실패 사유를 다시 확인했습니다.
+Codex 앱 기본 샌드박스에서 Compose를 선언한 테스트 프로젝트를 대상으로 `doctor --containers --format json`을 실행했습니다.
+`CTR-01`은 `fail`과 실패 사유 `docker_not_resolved`를 반환했습니다.
+명령 검색 결과는 `not_resolved`였으며 클라이언트 버전 조회는 `not_run`으로 기록됐습니다.
+진단 CLI의 종료 코드는 `1`이었습니다.
+
+같은 앱에서 `Get-Command -Name docker,docker.exe -All`과 `where.exe docker`로 확인한 명령 후보는 0개였습니다.
+앱 PATH 45곳, Windows 시스템·사용자 PATH, 일반 설치 경로 11곳에서 `docker.exe`를 찾지 못했습니다.
+이전 Compose 검증에서 쓴 임시 Windows 클라이언트 경로에도 `docker.exe`가 없었습니다.
+같은 앱 문맥에서 `CTR-01`이 `resolved`를 반환하면 해당 진단의 실패 사유를 다시 확인해야 합니다.
+
+Docker 엔진 접속은 `not_contacted`로 기록됐습니다.
+Compose 실행 점검 `CTR-02`는 `skipped`와 `not_run`을 반환했습니다.
+검증 전후 Codex 설정과 허용 규칙의 파일 내용, 수정 시각, 접근 권한이 일치했습니다.
+
 ## Docker Compose 정리 판정
 
 플러그인은 Docker 삭제 명령이 시간 초과돼도 엔진에서 컨테이너와 네트워크 목록을 다시 조회합니다.
